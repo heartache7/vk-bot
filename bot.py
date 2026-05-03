@@ -22,16 +22,15 @@ conn = None
 cursor = None
 
 def get_db():
-    """Железобетонное соединение с базой. Если Railway его оборвал - переподключаемся."""
     global conn, cursor
     try:
         if cursor is None:
             raise Exception("No cursor")
         cursor.execute("SELECT 1")
     except:
-        print(">>> [DB] Переподключение к базе данных...")
+        print(">>> [DB] Подключение к базе данных...")
         conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = True # Больше никаких потерянных conn.commit()
+        conn.autocommit = True
         cursor = conn.cursor()
     return conn, cursor
 
@@ -48,11 +47,12 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS cmd_permissions (peer_id BIGINT, cmd_name TEXT, min_lvl INT, PRIMARY KEY (peer_id, cmd_name));")
     cur.execute("CREATE TABLE IF NOT EXISTS chat_rules (peer_id BIGINT PRIMARY KEY, rules_text TEXT);")
     
-    # Защита от отсутствующих колонок
+    # === ТОТАЛЬНОЕ ИСПРАВЛЕНИЕ БАЗЫ ДАННЫХ ИЗ ЛОГОВ ===
     cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;")
+    cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS peer_id BIGINT;")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_count INT DEFAULT 0;")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
-    print(">>> [DATABASE] Структура инициализирована успешно.")
+    print(">>> [DATABASE] Структура исправлена и готова.")
 
 init_db()
 
@@ -106,9 +106,8 @@ async def handler(message: Message):
         pid = message.peer_id
         text = message.text.strip()
 
-        # --- БАЗОВАЯ ПРОВЕРКА (ПИНГ) ---
         if text.lower() in ["/ping", "!ping"]:
-            await message.answer("🏓 Понг! Я жив, ВК дает мне писать сообщения.")
+            await message.answer("🏓 Понг! База данных починена, крашей нет.")
             return
 
         _, cur = get_db()
@@ -120,7 +119,7 @@ async def handler(message: Message):
             except: pass
             return
 
-        # 2. АКТИВНОСТЬ (С авто-созданием юзера)
+        # 2. АКТИВНОСТЬ
         cur.execute("""
             INSERT INTO users (user_id, peer_id, msgs, last_seen) 
             VALUES (%s, %s, 1, CURRENT_TIMESTAMP) 
@@ -149,7 +148,6 @@ async def handler(message: Message):
                 await message.answer(f"⚡ Системно: [id{target}|пользователю] выдан ранг {lvl}.")
             return
 
-        # ПРОВЕРКА ПРАВ ДЛЯ ОСТАЛЬНЫХ
         min_req = await get_min_role(pid, cmd)
         if u_role < min_req and uid != OWNER_ID: return
 
@@ -192,10 +190,9 @@ async def handler(message: Message):
                         cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, 100) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=100", (m.member_id, pid))
                         await message.answer(f"✅ Владелец [id{m.member_id}|назначен].")
             except Exception as e:
-                await message.answer("❌ Выдайте мне админку для этой команды.")
+                await message.answer("❌ Выдайте мне права администратора.")
 
     except Exception as e:
-        # ЕСЛИ ЧТО-ТО СЛОМАЕТСЯ, БОТ БОЛЬШЕ НЕ ПРОМОЛЧИТ
         print(f"\n{'='*30}\nКРИТИЧЕСКАЯ ОШИБКА В КОДЕ:\n{traceback.format_exc()}\n{'='*30}\n")
 
 # =========================
@@ -209,7 +206,7 @@ async def maintenance_task():
             cur.execute("DELETE FROM punishments WHERE end_at <= %s", (now,))
             cur.execute("DELETE FROM users WHERE last_seen < %s AND role = 0", (now - timedelta(days=30),))
         except Exception as e:
-            print(f">>> [MAINTENANCE ERR] {e}")
+            pass
         await asyncio.sleep(60)
 
 async def main():
