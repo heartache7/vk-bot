@@ -28,27 +28,11 @@ def init_db():
         nickname TEXT, warn_count INT DEFAULT 0, last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, peer_id));
     """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS punishments (
-        id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT, 
-        type TEXT, end_at TIMESTAMP);
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS roles_titles (
-        peer_id BIGINT, role_lvl INT, title TEXT,
-        PRIMARY KEY (peer_id, role_lvl));
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS cmd_permissions (
-        peer_id BIGINT, cmd_name TEXT, min_lvl INT,
-        PRIMARY KEY (peer_id, cmd_name));
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS chat_rules (
-        peer_id BIGINT PRIMARY KEY, rules_text TEXT);
-    """)
+    cursor.execute("CREATE TABLE IF NOT EXISTS punishments (id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT, type TEXT, end_at TIMESTAMP);")
+    cursor.execute("CREATE TABLE IF NOT EXISTS roles_titles (peer_id BIGINT, role_lvl INT, title TEXT, PRIMARY KEY (peer_id, role_lvl));")
+    cursor.execute("CREATE TABLE IF NOT EXISTS cmd_permissions (peer_id BIGINT, cmd_name TEXT, min_lvl INT, PRIMARY KEY (peer_id, cmd_name));")
+    cursor.execute("CREATE TABLE IF NOT EXISTS chat_rules (peer_id BIGINT PRIMARY KEY, rules_text TEXT);")
     conn.commit()
-    print(">>> БАЗА ДАННЫХ ПРОВЕРЕНА И ГОТОВА")
 
 init_db()
 
@@ -62,9 +46,7 @@ async def maintenance_task():
             cursor.execute("DELETE FROM punishments WHERE end_at <= %s", (now,))
             cursor.execute("DELETE FROM users WHERE last_seen < %s AND role = 0", (now - timedelta(days=30),))
             conn.commit()
-        except Exception as e:
-            print(f"Ошибка очистки: {e}")
-            conn.rollback()
+        except: conn.rollback()
         await asyncio.sleep(60)
 
 # =========================
@@ -79,10 +61,7 @@ async def get_min_role(pid, cmd):
     cursor.execute("SELECT min_lvl FROM cmd_permissions WHERE peer_id=%s AND cmd_name=%s", (pid, cmd))
     res = cursor.fetchone()
     if res: return res[0]
-    defaults = {
-        "kick": 20, "ban": 60, "mute": 20, "warn": 20, "unban": 60, 
-        "unwarn": 20, "setrole": 100, "newrole": 100, "setrules": 100, "rnick": 40, "staff": 0
-    }
+    defaults = {"kick": 20, "ban": 60, "mute": 20, "warn": 20, "unban": 60, "unwarn": 20, "setrole": 100, "newrole": 100, "setrules": 100, "rnick": 40, "staff": 0, "snick": 0, "stats": 0}
     return defaults.get(cmd, 0)
 
 def get_role_title(pid, lvl):
@@ -124,80 +103,67 @@ async def main_handler(message: Message):
     if not message.text or message.from_id <= 0: return
     uid, pid = message.from_id, message.peer_id
 
-    # 1. Проверка МУТА
+    # Проверка МУТА
     cursor.execute("SELECT id FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, pid))
     if cursor.fetchone():
         try: await bot.api.messages.delete(message_ids=[message.id], delete_for_all=True)
         except: pass
         return
 
-    # 2. Лог активности
-    cursor.execute("""
-        INSERT INTO users (user_id, peer_id, msgs, last_seen) 
-        VALUES (%s, %s, 1, CURRENT_TIMESTAMP) 
-        ON CONFLICT (user_id, peer_id) 
-        DO UPDATE SET msgs = users.msgs + 1, last_seen = CURRENT_TIMESTAMP
-    """, (uid, pid))
+    # Лог активности
+    cursor.execute("INSERT INTO users (user_id, peer_id, msgs, last_seen) VALUES (%s, %s, 1, CURRENT_TIMESTAMP) ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs = users.msgs + 1, last_seen = CURRENT_TIMESTAMP", (uid, pid))
     conn.commit()
 
-    # 3. Обработка команд
     text = message.text.replace("!", "/")
     if not text.startswith("/"): return
-    
     parts = text.split()
-    cmd = parts[0][1:].lower()
-    args = parts[1:]
-    
-    print(f">>> Команда: {cmd} от {uid} в чате {pid}") # Лог для Railway
+    cmd, args = parts[0][1:].lower(), parts[1:]
 
     u_role, _, _, _ = get_user_data(uid, pid)
 
-    # --- SYSROLE (Владелец Бота) ---
+    # --- SYSROLE ---
     if cmd == "sysrole" and uid == OWNER_ID:
         target = await extract_id(message)
         if target and args:
             lvl = int(args[-1])
             cursor.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (target, pid, lvl, lvl))
             conn.commit()
-            return await message.answer(f"⚡ Системно: [id{target}|пользователю] выдан ранг {lvl}.")
+            return await message.answer(f"⚡ Системно выдан ранг {lvl}.")
 
-    # 4. Проверка прав
     min_req = await get_min_role(pid, cmd)
-    if u_role < min_req and uid != OWNER_ID:
-        return # Просто игнорим, если не хватает прав
+    if u_role < min_req and uid != OWNER_ID: return
 
-    # --- РЕАЛИЗАЦИЯ КОМАНД ---
+    # --- КОМАНДЫ ---
+    if cmd == "stats":
+        target = await extract_id(message) or uid
+        r, m, n, w = get_user_data(target, pid)
+        await message.answer(f"📊 [id{target}|Профиль]:\n🎭 Ник: {n or 'Нет'}\n✉ Сообщений: {m}\n⚠ Варны: {w}/3\n⭐ Роль: {get_role_title(pid, r)}")
 
-    if cmd == "staff":
-        cursor.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role > 0 ORDER BY role DESC", (pid,))
-        staff_list = cursor.fetchall()
-        if not staff_list: return await message.answer("😶 В этой беседе еще нет администрации.")
-        res = "👮 Список администрации:\n"
-        for s_id, s_lvl in staff_list:
-            res += f"• [id{s_id}|{get_role_title(pid, s_lvl)}]\n"
-        await message.answer(res)
+    elif cmd == "snick":
+        new_nick = " ".join(args)
+        if not new_nick: return await message.answer("📌 Напиши: /snick [твой ник]")
+        cursor.execute("UPDATE users SET nickname=%s WHERE user_id=%s AND peer_id=%s", (new_nick[:20], uid, pid))
+        conn.commit()
+        await message.answer(f"✅ Твой ник изменен на: {new_nick}")
 
     elif cmd == "rnick":
         target = await extract_id(message) or uid
         cursor.execute("UPDATE users SET nickname = NULL WHERE user_id=%s AND peer_id=%s", (target, pid))
         conn.commit()
-        await message.answer(f"✅ Никнейм [id{target}|пользователя] был сброшен.")
+        await message.answer(f"✅ Никнейм [id{target}|пользователя] сброшен.")
 
-    elif cmd == "rules":
-        cursor.execute("SELECT rules_text FROM chat_rules WHERE peer_id=%s", (pid,))
-        res = cursor.fetchone()
-        await message.answer(f"📜 Правила беседы:\n\n{res[0] if res else 'Правила еще не установлены.'}")
-
-    elif cmd == "setrules":
-        rules_txt = " ".join(args)
-        if not rules_txt: return await message.answer("📌 Напишите текст правил.")
-        cursor.execute("INSERT INTO chat_rules (peer_id, rules_text) VALUES (%s, %s) ON CONFLICT (peer_id) DO UPDATE SET rules_text=%s", (pid, rules_txt, rules_txt))
-        conn.commit()
-        await message.answer("✅ Правила обновлены.")
+    elif cmd == "staff":
+        cursor.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role > 0 ORDER BY role DESC", (pid,))
+        staff_list = cursor.fetchall()
+        if not staff_list: return await message.answer("😶 Администрации нет.")
+        res = "👮 Администрация чата:\n"
+        for s_id, s_lvl in staff_list:
+            res += f"• [id{s_id}|{get_role_title(pid, s_lvl)}]\n"
+        await message.answer(res)
 
     elif cmd == "warn":
         target = await extract_id(message)
-        if not target: return await message.answer("📌 Укажите пользователя.")
+        if not target: return
         cursor.execute("UPDATE users SET warn_count = warn_count + 1 WHERE user_id=%s AND peer_id=%s RETURNING warn_count", (target, pid))
         w = cursor.fetchone()[0]
         if w >= 3:
@@ -209,7 +175,7 @@ async def main_handler(message: Message):
             await message.answer(f"⛔ [id{target}|Пользователь] забанен (3/3 варна).")
         else:
             conn.commit()
-            await message.answer(f"⚠ [id{target}|Предупреждение] ({w}/3).")
+            await message.answer(f"⚠ Варн [id{target}|пользователю] ({w}/3).")
 
     elif cmd == "start":
         members = await bot.api.messages.get_conversation_members(peer_id=pid)
@@ -217,19 +183,14 @@ async def main_handler(message: Message):
             if getattr(m, 'is_owner', False):
                 cursor.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, 100) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=100", (m.member_id, pid))
                 conn.commit()
-                await message.answer(f"✅ Владелец [id{m.member_id}|назначен].")
-
-    elif cmd == "stats":
-        target = await extract_id(message) or uid
-        r, m, n, w = get_user_data(target, pid)
-        await message.answer(f"📊 Профиль [id{target}|пользователя]:\n🎭 Ник: {n or 'Нет'}\n✉ Сообщений: {m}\n⚠ Варны: {w}/3\n⭐ Роль: {get_role_title(pid, r)}")
+                await message.answer("✅ Владелец определен.")
 
 # =========================
-# RUN
+# RUNNER
 # =========================
+async def run_bot():
+    asyncio.create_task(maintenance_task())
+    await bot.run_polling()
+
 if __name__ == "__main__":
-    new_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(new_loop)
-    new_loop.create_task(maintenance_task())
-    print(">>> ПОДГОТОВКА ЗАВЕРШЕНА, ЗАПУСК POLLING...")
-    bot.run_forever()
+    asyncio.run(run_bot())
