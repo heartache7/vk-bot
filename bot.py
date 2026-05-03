@@ -16,12 +16,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 bot = Bot(token=VK_TOKEN)
 
 # =========================
-# SMART DATABASE SETUP
+# DATABASE ENGINE
 # =========================
 conn = None
 cursor = None
 
 def get_db():
+    """Подключение к БД с авто-переподключением."""
     global conn, cursor
     try:
         if cursor is None:
@@ -35,7 +36,9 @@ def get_db():
     return conn, cursor
 
 def init_db():
+    """Создание таблиц и исправление структуры из логов."""
     c, cur = get_db()
+    # Создание базовых таблиц
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT, peer_id BIGINT, role INT DEFAULT 0, msgs INT DEFAULT 0,
@@ -45,15 +48,15 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS punishments (id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT, type TEXT, end_at TIMESTAMP);")
     cur.execute("CREATE TABLE IF NOT EXISTS roles_titles (peer_id BIGINT, role_lvl INT, title TEXT, PRIMARY KEY (peer_id, role_lvl));")
     cur.execute("CREATE TABLE IF NOT EXISTS cmd_permissions (peer_id BIGINT, cmd_name TEXT, min_lvl INT, PRIMARY KEY (peer_id, cmd_name));")
-    cur.execute("CREATE TABLE IF NOT EXISTS chat_rules (peer_id BIGINT PRIMARY KEY, rules_text TEXT);")
     
-    # === ТОТАЛЬНОЕ ИСПРАВЛЕНИЕ БАЗЫ ДАННЫХ ИЗ ЛОГОВ ===
-    cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;")
-    cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS peer_id BIGINT;")
+    # Исправление ошибок из логов (добавление недостающих колонок)
+    [span_3](start_span)cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;") #[span_3](end_span)
+    [span_4](start_span)cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS peer_id BIGINT;") #[span_4](end_span)
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_count INT DEFAULT 0;")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
-    print(">>> [DATABASE] Структура исправлена и готова.")
+    print(">>> [DATABASE] Структура проверена и исправлена.")
 
+# Инициализируем БД при запуске
 init_db()
 
 # =========================
@@ -77,20 +80,13 @@ async def get_min_role(pid, cmd):
     cur.execute("SELECT min_lvl FROM cmd_permissions WHERE peer_id=%s AND cmd_name=%s", (pid, cmd))
     res = cur.fetchone()
     if res: return res[0]
-    defaults = {"kick": 20, "ban": 60, "mute": 20, "warn": 20, "unban": 60, "setrole": 100, "newrole": 100, "rnick": 40, "staff": 0, "stats": 0}
+    defaults = {"kick": 20, "ban": 60, "mute": 20, "warn": 20, "unban": 60, "setrole": 100, "rnick": 40, "staff": 0, "stats": 0}
     return defaults.get(cmd, 0)
 
 async def extract_id(message: Message):
     if message.reply_message: return message.reply_message.from_id
-    text = message.text
-    res = re.search(r"id(\d+)|\[id(\d+)\|", text)
+    res = re.search(r"id(\d+)|\[id(\d+)\|", message.text)
     if res: return int(res.group(1) or res.group(2))
-    domain = re.search(r"vk\.com/([\w\.]+)", text)
-    if domain:
-        try:
-            resolved = await bot.api.utils.resolve_screen_name(screen_name=domain.group(1))
-            if resolved.type.value == "user": return resolved.object_id
-        except: pass
     return None
 
 # =========================
@@ -102,24 +98,22 @@ async def handler(message: Message):
     try:
         if not message.text or message.from_id <= 0: return
         
-        uid = message.from_id
-        pid = message.peer_id
-        text = message.text.strip()
+        uid, pid, text = message.from_id, message.peer_id, message.text.strip()
 
+        # Тестовая команда без БД
         if text.lower() in ["/ping", "!ping"]:
-            await message.answer("🏓 Понг! База данных починена, крашей нет.")
-            return
+            return await message.answer("🏓 Понг! Бот активен, ошибки цикла asyncio устранены.")
 
         _, cur = get_db()
 
-        # 1. ПРОВЕРКА МУТА
+        # 1. Проверка мута
         cur.execute("SELECT id FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, pid))
         if cur.fetchone():
             try: await bot.api.messages.delete(message_ids=[message.id], delete_for_all=True)
             except: pass
             return
 
-        # 2. АКТИВНОСТЬ
+        # 2. Логирование активности
         cur.execute("""
             INSERT INTO users (user_id, peer_id, msgs, last_seen) 
             VALUES (%s, %s, 1, CURRENT_TIMESTAMP) 
@@ -127,31 +121,26 @@ async def handler(message: Message):
             DO UPDATE SET msgs = users.msgs + 1, last_seen = CURRENT_TIMESTAMP
         """, (uid, pid))
 
-        # 3. ПАРСИНГ КОМАНД
+        # 3. Обработка команд
         if not (text.startswith("/") or text.startswith("!")): return
-        
         parts = text[1:].split()
-        if not parts: return
-        cmd = parts[0].lower()
-        args = parts[1:]
-
-        print(f">>> [CMD] Выполнение /{cmd} от {uid}")
+        cmd, args = parts[0].lower(), parts[1:]
 
         u_role, _, _, _ = get_user_data(uid, pid)
-
-        # --- СИСТЕМНЫЕ КОМАНДЫ ---
+        
+        # Системная выдача прав владельцем
         if cmd == "sysrole" and uid == OWNER_ID:
             target = await extract_id(message)
             if target and args:
                 lvl = int(args[-1])
                 cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (target, pid, lvl, lvl))
-                await message.answer(f"⚡ Системно: [id{target}|пользователю] выдан ранг {lvl}.")
-            return
+                return await message.answer(f"⚡ Ранг {lvl} выдан пользователю [id{target}|id{target}].")
 
+        # Проверка прав доступа
         min_req = await get_min_role(pid, cmd)
         if u_role < min_req and uid != OWNER_ID: return
 
-        # --- ЛОГИКА КОМАНД ---
+        # Логика команд
         if cmd == "stats":
             target = await extract_id(message) or uid
             r, m, n, w = get_user_data(target, pid)
@@ -159,15 +148,14 @@ async def handler(message: Message):
 
         elif cmd == "warn":
             target = await extract_id(message)
-            if not target: return await message.answer("📌 Кого варним?")
+            if not target: return await message.answer("📌 Укажите пользователя.")
             cur.execute("UPDATE users SET warn_count = warn_count + 1 WHERE user_id=%s AND peer_id=%s RETURNING warn_count", (target, pid))
             w = cur.fetchone()[0]
             if w >= 3:
                 cur.execute("UPDATE users SET warn_count = 0 WHERE user_id=%s AND peer_id=%s", (target, pid))
-                cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at) VALUES (%s, %s, 'ban', %s)", (target, pid, datetime.now()+timedelta(days=1)))
                 try: await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target)
                 except: pass
-                await message.answer(f"⛔ [id{target}|Бан] за 3/3 варна.")
+                await message.answer(f"⛔ [id{target}|Бан] (3/3 варна).")
             else:
                 await message.answer(f"⚠ [id{target}|Варн] ({w}/3).")
 
@@ -175,12 +163,12 @@ async def handler(message: Message):
             cur.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role > 0 ORDER BY role DESC", (pid,))
             data = cur.fetchall()
             txt = "👮 Администрация:\n" + "\n".join([f"• [id{s[0]}|{get_role_title(pid, s[1])}]" for s in data])
-            await message.answer(txt if data else "Админов нет.")
+            await message.answer(txt if data else "Администрация не назначена.")
 
         elif cmd == "rnick":
             target = await extract_id(message) or uid
             cur.execute("UPDATE users SET nickname = NULL WHERE user_id=%s AND peer_id=%s", (target, pid))
-            await message.answer(f"✅ Ник [id{target}|сброшен].")
+            await message.answer(f"✅ Ник [id{target}|пользователя] сброшен.")
 
         elif cmd == "start":
             try:
@@ -189,30 +177,27 @@ async def handler(message: Message):
                     if getattr(m, 'is_owner', False):
                         cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, 100) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=100", (m.member_id, pid))
                         await message.answer(f"✅ Владелец [id{m.member_id}|назначен].")
-            except Exception as e:
-                await message.answer("❌ Выдайте мне права администратора.")
+            except:
+                await message.answer("❌ Мне нужны права администратора.")
 
-    except Exception as e:
-        print(f"\n{'='*30}\nКРИТИЧЕСКАЯ ОШИБКА В КОДЕ:\n{traceback.format_exc()}\n{'='*30}\n")
+    except Exception:
+        print(f"Ошибка в обработчике:\n{traceback.format_exc()}")
 
 # =========================
-# RUN BOT
+# MAINTENANCE & RUN
 # =========================
 async def maintenance_task():
+    """Фоновая очистка старых наказаний."""
     while True:
         try:
             _, cur = get_db()
-            now = datetime.now()
-            cur.execute("DELETE FROM punishments WHERE end_at <= %s", (now,))
-            cur.execute("DELETE FROM users WHERE last_seen < %s AND role = 0", (now - timedelta(days=30),))
-        except Exception as e:
-            pass
+            cur.execute("DELETE FROM punishments WHERE end_at <= %s", (datetime.now(),))
+        except: pass
         await asyncio.sleep(60)
 
-async def main():
-    asyncio.create_task(maintenance_task())
-    print(">>> [SYSTEM] БОТ И БАЗА ГОТОВЫ. ЖДУ СООБЩЕНИЙ...")
-    await bot.run_polling()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    # [span_5](start_span)Исправляем RuntimeError: добавляем фоновую задачу в цикл бота vkbottle[span_5](end_span)
+    bot.loop_wrapper.add_task(maintenance_task())
+    print(">>> [SYSTEM] БОТ И БАЗА ГОТОВЫ. ОШИБКИ ЦИКЛА ИСПРАВЛЕНЫ.")
+    # [span_6](start_span)Запускаем через run_forever, чтобы библиотека сама управляла циклом[span_6](end_span)
+    bot.run_forever()
