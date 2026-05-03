@@ -36,7 +36,7 @@ def get_db():
     return conn, cursor
 
 def init_db():
-    """Создание таблиц и исправление структуры из логов."""
+    """Создание таблиц и исправление структуры."""
     c, cur = get_db()
     # Создание базовых таблиц
     cur.execute("""
@@ -49,14 +49,13 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS roles_titles (peer_id BIGINT, role_lvl INT, title TEXT, PRIMARY KEY (peer_id, role_lvl));")
     cur.execute("CREATE TABLE IF NOT EXISTS cmd_permissions (peer_id BIGINT, cmd_name TEXT, min_lvl INT, PRIMARY KEY (peer_id, cmd_name));")
     
-    # Исправление ошибок из логов (добавление недостающих колонок)
-    [span_3](start_span)cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;") #[span_3](end_span)
-    [span_4](start_span)cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS peer_id BIGINT;") #[span_4](end_span)
+    # Исправление структуры (добавление колонок, если их нет)
+    cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;")
+    cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS peer_id BIGINT;")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_count INT DEFAULT 0;")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
     print(">>> [DATABASE] Структура проверена и исправлена.")
 
-# Инициализируем БД при запуске
 init_db()
 
 # =========================
@@ -100,9 +99,8 @@ async def handler(message: Message):
         
         uid, pid, text = message.from_id, message.peer_id, message.text.strip()
 
-        # Тестовая команда без БД
         if text.lower() in ["/ping", "!ping"]:
-            return await message.answer("🏓 Понг! Бот активен, ошибки цикла asyncio устранены.")
+            return await message.answer("🏓 Понг! Все ошибки синтаксиса устранены.")
 
         _, cur = get_db()
 
@@ -124,23 +122,21 @@ async def handler(message: Message):
         # 3. Обработка команд
         if not (text.startswith("/") or text.startswith("!")): return
         parts = text[1:].split()
+        if not parts: return
         cmd, args = parts[0].lower(), parts[1:]
 
         u_role, _, _, _ = get_user_data(uid, pid)
         
-        # Системная выдача прав владельцем
         if cmd == "sysrole" and uid == OWNER_ID:
             target = await extract_id(message)
             if target and args:
                 lvl = int(args[-1])
                 cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (target, pid, lvl, lvl))
-                return await message.answer(f"⚡ Ранг {lvl} выдан пользователю [id{target}|id{target}].")
+                return await message.answer(f"⚡ Ранг {lvl} выдан [id{target}|пользователю].")
 
-        # Проверка прав доступа
         min_req = await get_min_role(pid, cmd)
         if u_role < min_req and uid != OWNER_ID: return
 
-        # Логика команд
         if cmd == "stats":
             target = await extract_id(message) or uid
             r, m, n, w = get_user_data(target, pid)
@@ -178,7 +174,7 @@ async def handler(message: Message):
                         cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, 100) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=100", (m.member_id, pid))
                         await message.answer(f"✅ Владелец [id{m.member_id}|назначен].")
             except:
-                await message.answer("❌ Мне нужны права администратора.")
+                await message.answer("❌ Выдайте мне права администратора.")
 
     except Exception:
         print(f"Ошибка в обработчике:\n{traceback.format_exc()}")
@@ -196,8 +192,6 @@ async def maintenance_task():
         await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    # [span_5](start_span)Исправляем RuntimeError: добавляем фоновую задачу в цикл бота vkbottle[span_5](end_span)
     bot.loop_wrapper.add_task(maintenance_task())
-    print(">>> [SYSTEM] БОТ И БАЗА ГОТОВЫ. ОШИБКИ ЦИКЛА ИСПРАВЛЕНЫ.")
-    # [span_6](start_span)Запускаем через run_forever, чтобы библиотека сама управляла циклом[span_6](end_span)
+    print(">>> [SYSTEM] БОТ И БАЗА ГОТОВЫ. ОЖИДАНИЕ СООБЩЕНИЙ...")
     bot.run_forever()
