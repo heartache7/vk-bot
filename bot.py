@@ -6,16 +6,21 @@ from vkbottle.bot import Bot, Message
 # =========================
 # CONFIG
 # =========================
+# OWNER_ID остается в коде, это безопасно
 OWNER_ID = 676081199
 
-# Твой токен возвращен на место
-VK_TOKEN = "vk1.a.6f790amqcqoWVIoYKpyxZThiwL0tYxcC203wMm6YXLH1vXmKlPlIkDpEKkFbowjEmK-Y_nHlwjPxPSwn5GU_o4dkVaBDe9Xjeeo4iHoBSLYniLn9gQkbclJIhwd2UFgMbYb5twyJz5U-kG80dHUk5sI52R123G3pgTajWE69r3lOxMc1onWa0l-vAdedtHn-_uMxEfjrq9Ho6r-IDHK1hw"
+# Берем данные из переменных окружения Railway
+VK_TOKEN = os.getenv("VK_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not VK_TOKEN:
+    print("ОШИБКА: Переменная VK_TOKEN не найдена в Railway Variables!")
+    exit(1)
 
 bot = Bot(token=VK_TOKEN)
 
 # =========================
-# DATABASE
+# DATABASE INIT
 # =========================
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
@@ -97,11 +102,15 @@ def can_use(uid, peer, cmd):
     return get_role(uid, peer) >= need
 
 async def kick_user(peer_id, user_id):
+    # Метод работает только в беседах (peer_id > 2e9)
     if peer_id > 2000000000:
-        await bot.api.messages.remove_chat_user(
-            chat_id=peer_id - 2000000000,
-            user_id=user_id
-        )
+        try:
+            await bot.api.messages.remove_chat_user(
+                chat_id=peer_id - 2000000000,
+                user_id=user_id
+            )
+        except Exception as e:
+            print(f"Ошибка при кике: {e}")
 
 # =========================
 # HANDLER
@@ -110,6 +119,7 @@ async def kick_user(peer_id, user_id):
 async def handler(message: Message):
     if not message.text: return
 
+    # Логика подсчета сообщений
     if message.peer_id > 2000000000:
         cursor.execute("""
             INSERT INTO activity (user_id, peer_id, messages)
@@ -121,21 +131,30 @@ async def handler(message: Message):
 
     cmd, args = parse_cmd(message.text)
 
+    # --- Команды ---
     if cmd == "/start":
-        await message.answer("BOT ONLINE")
+        await message.answer("✅ Бот запущен и готов к работе!")
 
     elif cmd == "/help":
-        await message.answer("/ban, /warn, /mute, /kick, /stats, /banlist, /sysrole")
+        await message.answer(
+            "📋 Список команд:\n"
+            "/stats - твоя статистика\n"
+            "/ban [ID/reply] - бан (нужны права)\n"
+            "/kick [ID/reply] - кик\n"
+            "/banlist - список забаненных\n"
+            "/sysrole [ID] [число] - выдать роль (Owner)"
+        )
 
     elif cmd == "/sysrole":
         if message.from_id == OWNER_ID:
             uid = extract_user(message, args)
-            if uid and args:
+            if uid and len(args) >= 1:
                 try:
                     role = int(args[-1])
                     set_role(uid, message.peer_id, role)
-                    await message.answer(f"ID {uid} роль обновлена: {role}")
-                except: pass
+                    await message.answer(f"💾 Для пользователя {uid} установлена роль {role}")
+                except ValueError:
+                    await message.answer("⚠ Ошибка: роль должна быть числом")
 
     elif cmd == "/ban":
         if can_use(message.from_id, message.peer_id, "ban"):
@@ -144,12 +163,14 @@ async def handler(message: Message):
                 cursor.execute("INSERT INTO punishments (user_id, peer_id, type) VALUES (%s, %s, 'ban')", (uid, message.peer_id))
                 conn.commit()
                 await kick_user(message.peer_id, uid)
-                await message.answer("Пользователь забанен.")
+                await message.answer(f"🚫 Пользователь {uid} забанен.")
 
     elif cmd == "/kick":
         if can_use(message.from_id, message.peer_id, "kick"):
             uid = extract_user(message, args)
-            if uid: await kick_user(message.peer_id, uid)
+            if uid:
+                await kick_user(message.peer_id, uid)
+                await message.answer(f"👢 Пользователь {uid} исключен.")
 
     elif cmd == "/stats":
         uid = extract_user(message, args) or message.from_id
@@ -157,16 +178,20 @@ async def handler(message: Message):
         res = cursor.fetchone()
         msgs = res[0] if res else 0
         role = get_role(uid, message.peer_id)
-        await message.answer(f"ID: {uid}\nРоль: {role}\nСообщений: {msgs}")
+        await message.answer(f"📊 Статистика {uid}:\n⭐ Роль: {role}\n✉ Сообщений: {msgs}")
 
     elif cmd == "/banlist":
         cursor.execute("SELECT user_id FROM punishments WHERE peer_id=%s AND type='ban'", (message.peer_id,))
         rows = cursor.fetchall()
-        text = "Список банов:\n" + "\n".join([str(r[0]) for r in rows]) if rows else "Чисто."
-        await message.answer(text)
+        if not rows:
+            await message.answer("😇 Список банов пуст.")
+        else:
+            text = "🚫 Список забаненных:\n" + "\n".join([f"• id{r[0]}" for r in rows])
+            await message.answer(text)
 
 # =========================
 # RUN
 # =========================
 if __name__ == "__main__":
+    print("Бот запущен...")
     bot.run_forever()
