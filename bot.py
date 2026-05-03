@@ -6,17 +6,14 @@ import psycopg2
 from datetime import datetime, timedelta
 from vkbottle.bot import Bot, Message
 
-# =========================
-# КОНФИГУРАЦИЯ
-# =========================
-OWNER_ID = 676081199 
+OWNER_ID = 676081199
 VK_TOKEN = os.getenv("VK_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 bot = Bot(token=VK_TOKEN)
 
 # =========================
-# БАЗА ДАННЫХ
+# DB
 # =========================
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
@@ -25,202 +22,307 @@ def get_db():
 
 def init_db():
     conn, cur = get_db()
-    try:
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT, peer_id BIGINT, role INT DEFAULT 0, msgs INT DEFAULT 0,
-            nickname TEXT, warn_count INT DEFAULT 0, last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );""")
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS punishments (
-            id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT, 
-            type TEXT, end_at TIMESTAMP
-        );""")
-        cur.execute("CREATE TABLE IF NOT EXISTS roles_titles (peer_id BIGINT, role_lvl INT, title TEXT, PRIMARY KEY (peer_id, role_lvl));")
-        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS user_peer_idx ON users (user_id, peer_id);")
-        print(">>> [DATABASE] Система FLEX инициализирована на 100%.")
-    except Exception as e:
-        print(f">>> [DB ERROR] {e}")
-    finally:
-        conn.close()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id BIGINT,
+        peer_id BIGINT,
+        role INT DEFAULT 0,
+        msgs INT DEFAULT 0,
+        nickname TEXT,
+        warn_count INT DEFAULT 0
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS punishments (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        peer_id BIGINT,
+        type TEXT,
+        end_at TIMESTAMP
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS cmd_permissions (
+        peer_id BIGINT,
+        cmd_name TEXT,
+        min_lvl INT,
+        PRIMARY KEY (peer_id, cmd_name)
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS roles_titles (
+        peer_id BIGINT,
+        role_lvl INT,
+        title TEXT,
+        PRIMARY KEY (peer_id, role_lvl)
+    );
+    """)
+
+    cur.execute("""
+    CREATE UNIQUE INDEX IF NOT EXISTS user_peer_idx
+    ON users (user_id, peer_id);
+    """)
+
+    conn.close()
 
 init_db()
 
 # =========================
-# УТИЛИТЫ
+# UTILS
 # =========================
-def parse_time_ru(time_str):
-    units = {'m': ('минут', 'минуты', 'минуту'), 'h': ('часов', 'часа', 'час'), 'd': ('дней', 'дня', 'день')}
-    match = re.match(r"(\d+)([mhd])", time_str.lower())
-    if not match: return None, None
-    val, unit = int(match.group(1)), match.group(2)
-    label = units[unit][2] if val == 1 else (units[unit][1] if 1 < val < 5 else units[unit][0])
-    delta = {'m': timedelta(minutes=val), 'h': timedelta(hours=val), 'd': timedelta(days=val)}[unit]
-    return datetime.now() + delta, f"{val} {label}"
+def parse_time(t):
+    m = re.match(r"(\d+)([mhd])", t.lower())
+    if not m:
+        return None
+    v, u = int(m.group(1)), m.group(2)
+    return {"m": timedelta(minutes=v), "h": timedelta(hours=v), "d": timedelta(days=v)}[u]
 
-async def get_user_data(uid, pid):
+async def extract_id(msg: Message):
+    if msg.reply_message:
+        return msg.reply_message.from_id
+
+    r = re.search(r"id(\d+)|\[id(\d+)\|", msg.text)
+    if r:
+        return int(r.group(1) or r.group(2))
+
+    for p in msg.text.split():
+        if p.isdigit():
+            return int(p)
+
+    return None
+
+async def get_user(uid, pid):
     conn, cur = get_db()
-    cur.execute("SELECT role, nickname FROM users WHERE user_id=%s AND peer_id=%s", (uid, pid))
-    res = cur.fetchone()
+    cur.execute("SELECT role, warn_count FROM users WHERE user_id=%s AND peer_id=%s", (uid, pid))
+    r = cur.fetchone()
     conn.close()
-    return res if res else (0, None)
+    return r if r else (0, 0)
 
-async def extract_id(message: Message):
-    if message.reply_message: return message.reply_message.from_id
-    res = re.search(r"id(\d+)|\[id(\d+)\|", message.text)
-    return int(res.group(1) or res.group(2)) if res else None
+async def get_min_role(pid, cmd):
+    conn, cur = get_db()
+    cur.execute("SELECT min_lvl FROM cmd_permissions WHERE peer_id=%s AND cmd_name=%s", (pid, cmd))
+    r = cur.fetchone()
+    conn.close()
+
+    if r:
+        return r[0]
+
+    return {
+        "warn": 20, "unwarn": 20,
+        "mute": 20, "unmute": 20,
+        "kick": 60,
+        "ban": 80, "unban": 80,
+        "setrole": 100,
+        "newrole": 100,
+        "delrole": 100,
+        "setcmd": 100
+    }.get(cmd, 0)
+
+async def get_role_title(pid, lvl):
+    if lvl >= 100:
+        return "Владелец"
+
+    conn, cur = get_db()
+    cur.execute("SELECT title FROM roles_titles WHERE peer_id=%s AND role_lvl=%s", (pid, lvl))
+    r = cur.fetchone()
+    conn.close()
+
+    if r:
+        return r[0]
+
+    return {80: "Админ", 60: "Модер", 20: "Помощник", 0: "Пользователь"}.get(lvl, f"Роль {lvl}")
 
 # =========================
-# ОБРАБОТЧИК
+# MAIN
 # =========================
 @bot.on.message()
-async def handler(message: Message):
+async def handler(msg: Message):
     conn = None
     try:
-        if not message.text or message.from_id <= 0: return
-        uid, pid, text = message.from_id, message.peer_id, message.text.strip()
+        if not msg.text or msg.from_id <= 0:
+            return
 
-        # Мут-фильтр (удаление сообщений забаненных/замученных)
+        uid, pid = msg.from_id, msg.peer_id
+        text = msg.text.strip()
+
         conn, cur = get_db()
-        cur.execute("SELECT id FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, pid))
+
+        # BAN AUTO-KICK
+        cur.execute("SELECT id FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban'", (uid, pid))
         if cur.fetchone():
-            try: await bot.api.messages.delete(message_ids=[message.id], delete_for_all=True)
-            except: pass
+            try:
+                await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=uid)
+            except:
+                pass
             return
 
-        # Обновление статистики
-        cur.execute("INSERT INTO users (user_id, peer_id, msgs) VALUES (%s, %s, 1) ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs = users.msgs + 1", (uid, pid))
+        # MUTE CHECK
+        cur.execute("SELECT end_at FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, pid))
+        row = cur.fetchone()
+        if row:
+            if row[0] and row[0] <= datetime.now():
+                cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, pid))
+            else:
+                try:
+                    await bot.api.messages.delete(message_ids=[msg.id], delete_for_all=True)
+                except:
+                    pass
+                return
 
-        if not (text.startswith("/") or text.startswith("!")): return
+        # STATS
+        cur.execute("""
+        INSERT INTO users (user_id, peer_id, msgs)
+        VALUES (%s, %s, 1)
+        ON CONFLICT (user_id, peer_id)
+        DO UPDATE SET msgs = users.msgs + 1
+        """, (uid, pid))
+
+        if not (text.startswith("/") or text.startswith("!")):
+            return
+
         parts = text[1:].split()
-        cmd, args = parts[0].lower(), parts[1:]
-        u_role, _ = await get_user_data(uid, pid)
+        cmd = parts[0].lower()
+        args = parts[1:]
 
-        # --- БАЗОВЫЕ КОМАНДЫ ---
-        if cmd == "ping": return await message.answer("👋 FLEX активен!")
-        if cmd in ["help", "помощь"]:
-            return await message.answer(
-                "📒 СПРАВКА FLEX (100%):\n\n"
-                "👤 ОБЩИЕ: /stats, /snick, /nlist\n"
-                "👮 МОДЕРАЦИЯ (Нужен ранг выше цели):\n"
-                "• /warn, /mute, /kick, /ban\n"
-                "• /unwarn, /unmute, /unban — Снятие наказаний.\n"
-                "• /rnick — Сброс ника.\n\n"
-                "👑 УПРАВЛЕНИЕ: /setrole, /start"
-            )
+        role, warns = await get_user(uid, pid)
 
-        if cmd == "start":
-            res = await bot.api.messages.get_conversation_members(peer_id=pid)
-            for m in res.items:
-                if getattr(m, "is_owner", False):
-                    cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, 100) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=100", (m.member_id, pid))
-                    return await message.answer(f"✅ Создатель [id{m.member_id}|Владелец] синхронизирован.")
-            return
+        need = await get_min_role(pid, cmd)
+        if uid != OWNER_ID and role < need:
+            return await msg.answer(f"🚫 Нужно {need}+")
 
-        # --- КОМАНДЫ СНЯТИЯ НАКАЗАНИЙ (UN...) ---
-        if cmd in ["unwarn", "unmute", "unban"]:
-            target_id = await extract_id(message)
-            if not target_id: return await message.answer(f"📖 Инструкция /{cmd}:\nОтветьте на сообщение или напишите: /{cmd} [ссылка]")
-            
-            # Проверка иерархии (Снимать может только тот, кто равен или выше по рангу, либо владелец)
-            t_role, _ = await get_user_data(target_id, pid)
-            if uid != OWNER_ID and u_role < t_role:
-                return await message.answer("⚠️ Вы не можете снимать наказания с тех, кто выше вас по рангу.")
+        # =========================
+        if cmd == "setrole":
+            tid = await extract_id(msg)
+            if not tid or not args:
+                return await msg.answer("/setrole [id] [lvl]")
 
-            if cmd == "unwarn":
-                if u_role < 20 and uid != OWNER_ID: return await message.answer("🚫 Нужно 20+ ранг.")
-                cur.execute("UPDATE users SET warn_count = 0 WHERE user_id=%s AND peer_id=%s", (target_id, pid))
-                return await message.answer(f"✅ Все варны [id{target_id}|пользователя] обнулены.")
-
-            elif cmd == "unmute":
-                if u_role < 20 and uid != OWNER_ID: return await message.answer("🚫 Нужно 20+ ранг.")
-                cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (target_id, pid))
-                return await message.answer(f"✅ Мут с [id{target_id}|пользователя] снят.")
-
-            elif cmd == "unban":
-                if u_role < 80 and uid != OWNER_ID: return await message.answer("🚫 Нужно 80+ ранг.")
-                cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban'", (target_id, pid))
-                return await message.answer(f"✅ [id{target_id}|Пользователь] разбанен в этой беседе.")
-
-        # --- КОМАНДЫ НАКАЗАНИЯ ---
-        if cmd in ["warn", "mute", "ban", "kick"]:
-            target_id = await extract_id(message)
-            if not target_id: return await message.answer(f"📖 Инструкция /{cmd}:\n/{cmd} [ссылка/ответ] [время] [причина]")
-            
-            t_role, _ = await get_user_data(target_id, pid)
-            if uid != OWNER_ID and u_role <= t_role: return await message.answer(f"⚠️ Ранг цели ({t_role}) выше или равен вашему ({u_role}).")
-
-            end_time, time_label, reason = None, "навсегда", "не указана"
-            clean_args = [a for a in args if not re.search(r"id\d+|\[id\d+\|", a)]
-            if clean_args:
-                potential_time, t_text = parse_time_ru(clean_args[0])
-                if potential_time:
-                    end_time, time_label = potential_time, t_text
-                    reason = " ".join(clean_args[1:]) if len(clean_args) > 1 else "не указана"
-                else: reason = " ".join(clean_args)
-
-            report = f"📝 ОТЧЕТ:\n🎭 Нарушитель: [id{target_id}|Юзер]\n👮 Админ: [id{uid}|Админ]\n⏳ Срок: {time_label}\n📄 Причина: {reason}\n"
-
-            if cmd == "warn":
-                if u_role < 20 and uid != OWNER_ID: return await message.answer("🚫 Нужен ранг 20+")
-                cur.execute("UPDATE users SET warn_count = warn_count + 1 WHERE user_id=%s AND peer_id=%s RETURNING warn_count", (target_id, pid))
-                w = cur.fetchone()[0]
-                if w >= 3:
-                    cur.execute("UPDATE users SET warn_count = 0 WHERE user_id=%s AND peer_id=%s", (target_id, pid))
-                    await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target_id)
-                    return await message.answer(f"{report}⛔ Итог: Бан (3/3 варнов).")
-                return await message.answer(f"{report}⚠ Итог: Варн ({w}/3).")
-
-            elif cmd == "mute":
-                if u_role < 20 and uid != OWNER_ID: return await message.answer("🚫 Нужен ранг 20+")
-                if not end_time: end_time = datetime.now() + timedelta(hours=1); time_label = "1 час"
-                cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at) VALUES (%s, %s, 'mute', %s)", (target_id, pid, end_time))
-                return await message.answer(f"{report}🔇 Итог: Мут.")
-
-            elif cmd == "ban":
-                if u_role < 80 and uid != OWNER_ID: return await message.answer("🚫 Нужен ранг 80+")
-                cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at) VALUES (%s, %s, 'ban', %s)", (target_id, pid, end_time))
-                await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target_id)
-                return await message.answer(f"{report}🚫 Итог: Бан.")
-
-            elif cmd == "kick":
-                if u_role < 60 and uid != OWNER_ID: return await message.answer("🚫 Нужен ранг 60+")
-                await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target_id)
-                return await message.answer(f"{report}👢 Итог: Кик.")
-
-        # --- СИСТЕМА НИКОВ / РОЛЕЙ ---
-        elif cmd == "snick":
-            if not args: return await message.answer("📖 Инструкция /snick: /snick [ник]")
-            nick = " ".join(args)[:20]
-            cur.execute("UPDATE users SET nickname = %s WHERE user_id = %s AND peer_id = %s", (nick, uid, pid))
-            return await message.answer(f"✅ Ник изменен: {nick}")
-
-        elif cmd == "rnick":
-            if u_role < 40 and uid != OWNER_ID: return await message.answer("🚫 Нужен ранг 40+")
-            target = target_id or uid
-            cur.execute("UPDATE users SET nickname = NULL WHERE user_id=%s AND peer_id=%s", (target, pid))
-            return await message.answer(f"✅ Ник [id{target}|участника] удален.")
-
-        elif cmd == "setrole" and (uid == OWNER_ID or u_role >= 100):
-            if not target_id or not args: return await message.answer("📖 Инструкция /setrole: /setrole [ссылка] [ранг]")
             lvl = int(args[-1])
-            cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (target_id, pid, lvl, lvl))
-            return await message.answer(f"✅ Ранг {lvl} выдан [id{target_id}|юзеру].")
+            cur.execute("""
+            INSERT INTO users (user_id, peer_id, role)
+            VALUES (%s,%s,%s)
+            ON CONFLICT (user_id, peer_id)
+            DO UPDATE SET role=%s
+            """, (tid, pid, lvl, lvl))
 
-    except Exception: print(traceback.format_exc())
+            return await msg.answer(f"роль {lvl} выдана")
+
+        # =========================
+        if cmd == "newrole":
+            lvl = int(args[0])
+            title = " ".join(args[1:])
+            cur.execute("""
+            INSERT INTO roles_titles VALUES (%s,%s,%s)
+            ON CONFLICT (peer_id, role_lvl)
+            DO UPDATE SET title=%s
+            """, (pid, lvl, title, title))
+            return await msg.answer("роль сохранена")
+
+        if cmd == "roles":
+            cur.execute("SELECT role_lvl,title FROM roles_titles WHERE peer_id=%s ORDER BY role_lvl DESC", (pid,))
+            data = cur.fetchall()
+            return await msg.answer("\n".join([f"{i[0]} — {i[1]}" for i in data]) or "нет ролей")
+
+        if cmd == "delrole":
+            cur.execute("DELETE FROM roles_titles WHERE peer_id=%s AND role_lvl=%s", (pid, int(args[0])))
+            return await msg.answer("удалено")
+
+        # =========================
+        if cmd == "setcmd":
+            cname = args[0]
+            lvl = int(args[1])
+            cur.execute("""
+            INSERT INTO cmd_permissions VALUES (%s,%s,%s)
+            ON CONFLICT (peer_id,cmd_name)
+            DO UPDATE SET min_lvl=%s
+            """, (pid, cname, lvl, lvl))
+            return await msg.answer("ok")
+
+        # =========================
+        if cmd == "warn":
+            tid = await extract_id(msg)
+            cur.execute("""
+            INSERT INTO users (user_id,peer_id,warn_count)
+            VALUES (%s,%s,1)
+            ON CONFLICT (user_id,peer_id)
+            DO UPDATE SET warn_count=users.warn_count+1
+            RETURNING warn_count
+            """, (tid, pid))
+            w = cur.fetchone()[0]
+
+            if w >= 3:
+                cur.execute("UPDATE users SET warn_count=0 WHERE user_id=%s AND peer_id=%s", (tid, pid))
+                await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=tid)
+                return await msg.answer("бан (3/3)")
+
+            return await msg.answer(f"варн {w}/3")
+
+        if cmd == "unwarn":
+            tid = await extract_id(msg)
+            cur.execute("""
+            UPDATE users SET warn_count=GREATEST(warn_count-1,0)
+            WHERE user_id=%s AND peer_id=%s RETURNING warn_count
+            """, (tid, pid))
+            return await msg.answer(f"теперь {cur.fetchone()[0]}/3")
+
+        # =========================
+        if cmd == "mute":
+            tid = await extract_id(msg)
+            dur = parse_time(args[0]) if args else timedelta(minutes=30)
+            cur.execute("SELECT end_at FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (tid, pid))
+            row = cur.fetchone()
+
+            if row and row[0]:
+                end = row[0] + dur
+                cur.execute("UPDATE punishments SET end_at=%s WHERE user_id=%s AND peer_id=%s AND type='mute'", (end, tid, pid))
+            else:
+                end = datetime.now() + dur
+                cur.execute("INSERT INTO punishments (user_id,peer_id,type,end_at) VALUES (%s,%s,'mute',%s)", (tid, pid, end))
+
+            return await msg.answer("мут")
+
+        if cmd == "unmute":
+            tid = await extract_id(msg)
+            cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (tid, pid))
+            return await msg.answer("размут")
+
+        # =========================
+        if cmd == "ban":
+            tid = await extract_id(msg)
+            cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban'", (tid, pid))
+            cur.execute("INSERT INTO punishments (user_id,peer_id,type) VALUES (%s,%s,'ban')", (tid, pid))
+            await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=tid)
+            return await msg.answer("бан")
+
+        if cmd == "unban":
+            tid = await extract_id(msg)
+            cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban'", (tid, pid))
+            return await msg.answer("разбан")
+
+        if cmd == "kick":
+            tid = await extract_id(msg)
+            await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=tid)
+            return await msg.answer("кик")
+
+    except:
+        print(traceback.format_exc())
     finally:
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
+# =========================
 async def maintenance():
     while True:
         try:
             conn, cur = get_db()
             cur.execute("DELETE FROM punishments WHERE end_at <= %s", (datetime.now(),))
             conn.close()
-        except: pass
+        except:
+            pass
         await asyncio.sleep(60)
 
 if __name__ == "__main__":
     bot.loop_wrapper.add_task(maintenance())
-    print(">>> FLEX ГОТОВ НА 100%.")
     bot.run_forever()
