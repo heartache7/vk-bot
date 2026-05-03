@@ -127,7 +127,7 @@ async def handler(message: Message):
     if not message.text:
         return
 
-    # activity
+    # activity counter
     if message.peer_id > 2000000000:
         cursor.execute("""
             INSERT INTO activity (user_id, peer_id, messages)
@@ -162,7 +162,7 @@ async def handler(message: Message):
         return
 
     # =========================
-    # SYSROLE (ONLY OWNER)
+    # SYSROLE (OWNER ONLY)
     # =========================
     if cmd == "/sysrole":
         if message.from_id != OWNER_ID:
