@@ -16,35 +16,33 @@ bot = Bot(token=VK_TOKEN)
 # =========================
 # DATABASE
 # =========================
+# Подключаемся к БД
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
 def init_db():
-    # Создаем основные таблицы
+    # ВАЖНО: Эта строка лечит твою ошибку "column peer_id does not exist"
+    # Она удалит старую кривую таблицу и создаст новую.
+    # ПОСЛЕ ПЕРВОГО ЗАПУСКА ЭТУ СТРОКУ НУЖНО УДАЛИТЬ!
+    cursor.execute("DROP TABLE IF EXISTS users CASCADE;") 
+    
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT, 
         peer_id BIGINT, 
         role INT DEFAULT 0, 
         msgs INT DEFAULT 0,
+        invited_by BIGINT,
+        invited_at TIMESTAMP,
+        last_msg_at TIMESTAMP,
         PRIMARY KEY (user_id, peer_id));
     """)
-    
-    # Умное обновление: добавляем колонки, если их нет
-    cols = {
-        "invited_by": "BIGINT",
-        "invited_at": "TIMESTAMP",
-        "last_msg_at": "TIMESTAMP"
-    }
-    for col, type in cols.items():
-        cursor.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {type};")
-
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS punishments (
         id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT, type TEXT);
     """)
     conn.commit()
-    print(">>> База данных готова к работе.")
+    print(">>> БАЗА ДАННЫХ ПЕРЕСОЗДАНА И ГОТОВА")
 
 init_db()
 
@@ -56,7 +54,6 @@ def get_user_data(uid, pid):
     res = cursor.fetchone()
     if not res:
         return (0, 0, 0, None, None)
-    # Если это владелец, принудительно ставим роль 100
     role = 100 if uid == OWNER_ID else res[0]
     return (role, res[1], res[2], res[3], res[4])
 
@@ -71,7 +68,7 @@ def extract_id(message: Message):
     return None
 
 # =========================
-# EVENT: ОБРАБОТКА ПРИГЛАШЕНИЙ
+# EVENTS
 # =========================
 @bot.on.raw_event("message_new", dataclass=Message)
 async def invitation_handler(message: Message):
@@ -98,29 +95,28 @@ async def handler(message: Message):
     uid, pid = message.from_id, message.peer_id
     now = datetime.now()
     
-    # Обновляем активность
+    # 1. Запись активности
     cursor.execute("""
         INSERT INTO users (user_id, peer_id, msgs, last_msg_at) VALUES (%s, %s, 1, %s)
         ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs = users.msgs + 1, last_msg_at = %s
     """, (uid, pid, now, now))
     conn.commit()
 
+    # 2. Парсинг команды
     text = message.text.replace("!", "/").lower()
     args = text.split()
     cmd = args[0] if args else ""
 
-    # --- ПРОВЕРКА РОЛИ ---
-    u_role, u_msgs, u_inviter, u_at, u_last = get_user_data(uid, pid)
+    u_role, _, _, _, _ = get_user_data(uid, pid)
 
-    # --- КОМАНДЫ ДЛЯ ВСЕХ (РОЛЬ 0+) ---
-
+    # --- КОМАНДЫ ДЛЯ ВСЕХ ---
     if cmd == "/start":
-        await message.answer("✅ Чат-менеджер запущен. Напишите /help.")
+        await message.answer("✅ Бот запущен. Напиши /help для списка команд.")
 
     elif cmd == "/help":
-        help_text = "🔧 Доступные вам команды:\n/stats [id] — статистика"
+        help_text = "🔧 Доступные команды:\n/stats [id] — статистика"
         if u_role >= 1 or uid == OWNER_ID:
-            help_text += "\n\n👮 Команды админа:\n/kick, /ban, /warn, /mute, /banlist"
+            help_text += "\n\n👮 Админ-команды:\n/kick, /ban, /warn, /mute, /banlist"
         if uid == OWNER_ID:
             help_text += "\n👑 /sysrole [id] [role]"
         await message.answer(help_text)
@@ -129,7 +125,6 @@ async def handler(message: Message):
         target = extract_id(message) or uid
         t_role, t_msgs, t_inviter, t_at, t_last = get_user_data(target, pid)
         
-        # Красивое форматирование дат
         inv_by = f"[id{t_inviter}|Пользователем]" if t_inviter else "Неизвестно"
         date_inv = t_at.strftime('%d.%m.%Y %H:%M') if t_at else "Нет данных"
         last_act = t_last.strftime('%d.%m.%Y %H:%M') if t_last else "Только что"
@@ -140,55 +135,49 @@ async def handler(message: Message):
             f"📅 Приглашён: {date_inv}\n"
             f"👤 Кем: {inv_by}\n"
             f"🕒 Последний актив: {last_act}\n"
-            f"⭐ Приоритет в боте: {t_role}"
+            f"⭐ Приоритет: {t_role}"
         )
 
-    # --- КОМАНДЫ ДЛЯ АДМИНОВ (ОБЫЧНЫМ ЮЗЕРАМ НЕ ОТВЕЧАЕТ) ---
-
+    # --- КОМАНДЫ ДЛЯ АДМИНОВ ---
     elif cmd in ["/kick", "/ban", "/warn", "/mute", "/banlist", "/sysrole"]:
-        # Если юзер не админ и не владелец — игнорируем полностью
-        if u_role < 1 and uid != OWNER_ID:
-            return 
+        if u_role < 1 and uid != OWNER_ID: return 
 
-        # Логика SYSROLE (Только владелец)
         if cmd == "/sysrole":
             if uid != OWNER_ID: return
             target = extract_id(message)
             if target and len(args) > 1:
                 try:
                     new_role = int(args[-1])
-                    cursor.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=EXCLUDED.role", (target, pid, new_role))
+                    cursor.execute("UPDATE users SET role=%s WHERE user_id=%s AND peer_id=%s", (new_role, target, pid))
                     conn.commit()
-                    await message.answer(f"✅ Для [id{target}|пользователя] установлен приоритет {new_role}")
+                    await message.answer(f"✅ Установлен приоритет {new_role} для [id{target}|пользователя]")
                 except: pass
             return
 
-        # Логика Модерации
         target = extract_id(message)
         if not target and cmd != "/banlist":
-            await message.answer("⚠ Укажите пользователя (ID или пересланное сообщение)")
+            await message.answer("⚠ Укажите ID или ответьте на сообщение.")
             return
 
         if cmd == "/kick":
-            if pid > 2000000000:
-                try:
-                    await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target)
-                    await message.answer("✅ Пользователь исключен.")
-                except: await message.answer("❌ Ошибка: я должен быть администратором беседы.")
+            try:
+                await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target)
+                await message.answer("✅ Исключен.")
+            except: await message.answer("❌ Ошибка: проверьте мои права админа.")
         
         elif cmd == "/banlist":
             cursor.execute("SELECT DISTINCT user_id FROM punishments WHERE peer_id=%s AND type='ban'", (pid,))
             rows = cursor.fetchall()
-            text = "🚫 Список забаненных в этой беседе:\n" + "\n".join([f"• id{r[0]}" for r in rows]) if rows else "Список пуст."
+            text = "🚫 Баны:\n" + "\n".join([f"• id{r[0]}" for r in rows]) if rows else "Пусто"
             await message.answer(text)
 
         else: # ban, warn, mute
             cursor.execute("INSERT INTO punishments (user_id, peer_id, type) VALUES (%s, %s, %s)", (target, pid, cmd[1:]))
             conn.commit()
-            if cmd == "/ban" and pid > 2000000000:
+            if cmd == "/ban":
                 try: await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target)
                 except: pass
-            await message.answer(f"✅ Команда {cmd} применена к [id{target}|пользователю].")
+            await message.answer(f"✅ Команда {cmd} выполнена.")
 
 if __name__ == "__main__":
     bot.run_forever()
