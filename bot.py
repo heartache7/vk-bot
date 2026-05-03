@@ -1,10 +1,10 @@
 import os
 import re
 import asyncio
+import traceback
 import psycopg2
 from datetime import datetime, timedelta
 from vkbottle.bot import Bot, Message
-from vkbottle.dispatch.rules.base import ChatActionRule
 
 # =========================
 # CONFIG
@@ -16,63 +16,75 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 bot = Bot(token=VK_TOKEN)
 
 # =========================
-# DATABASE SETUP
+# SMART DATABASE SETUP
 # =========================
-conn = psycopg2.connect(DATABASE_URL)
-cursor = conn.cursor()
+conn = None
+cursor = None
+
+def get_db():
+    """Железобетонное соединение с базой. Если Railway его оборвал - переподключаемся."""
+    global conn, cursor
+    try:
+        if cursor is None:
+            raise Exception("No cursor")
+        cursor.execute("SELECT 1")
+    except:
+        print(">>> [DB] Переподключение к базе данных...")
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.autocommit = True # Больше никаких потерянных conn.commit()
+        cursor = conn.cursor()
+    return conn, cursor
 
 def init_db():
-    cursor.execute("""
+    c, cur = get_db()
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT, peer_id BIGINT, role INT DEFAULT 0, msgs INT DEFAULT 0,
         nickname TEXT, warn_count INT DEFAULT 0, last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, peer_id));
     """)
-    cursor.execute("CREATE TABLE IF NOT EXISTS punishments (id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT, type TEXT, end_at TIMESTAMP);")
-    cursor.execute("CREATE TABLE IF NOT EXISTS roles_titles (peer_id BIGINT, role_lvl INT, title TEXT, PRIMARY KEY (peer_id, role_lvl));")
-    cursor.execute("CREATE TABLE IF NOT EXISTS cmd_permissions (peer_id BIGINT, cmd_name TEXT, min_lvl INT, PRIMARY KEY (peer_id, cmd_name));")
-    cursor.execute("CREATE TABLE IF NOT EXISTS chat_rules (peer_id BIGINT PRIMARY KEY, rules_text TEXT);")
+    cur.execute("CREATE TABLE IF NOT EXISTS punishments (id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT, type TEXT, end_at TIMESTAMP);")
+    cur.execute("CREATE TABLE IF NOT EXISTS roles_titles (peer_id BIGINT, role_lvl INT, title TEXT, PRIMARY KEY (peer_id, role_lvl));")
+    cur.execute("CREATE TABLE IF NOT EXISTS cmd_permissions (peer_id BIGINT, cmd_name TEXT, min_lvl INT, PRIMARY KEY (peer_id, cmd_name));")
+    cur.execute("CREATE TABLE IF NOT EXISTS chat_rules (peer_id BIGINT PRIMARY KEY, rules_text TEXT);")
     
-    # Исправление структуры, если колонки пропали
-    cursor.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;")
-    cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_count INT DEFAULT 0;")
-    cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
-    conn.commit()
-    print(">>> [DATABASE] Структура проверена.")
+    # Защита от отсутствующих колонок
+    cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_count INT DEFAULT 0;")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+    print(">>> [DATABASE] Структура инициализирована успешно.")
 
 init_db()
-
-async def maintenance_task():
-    while True:
-        try:
-            now = datetime.now()
-            cursor.execute("DELETE FROM punishments WHERE end_at <= %s", (now,))
-            cursor.execute("DELETE FROM users WHERE last_seen < %s AND role = 0", (now - timedelta(days=30),))
-            conn.commit()
-        except:
-            conn.rollback()
-        await asyncio.sleep(60)
 
 # =========================
 # HELPERS
 # =========================
 def get_user_data(uid, pid):
-    cursor.execute("SELECT role, msgs, nickname, warn_count FROM users WHERE user_id=%s AND peer_id=%s", (uid, pid))
-    res = cursor.fetchone()
+    _, cur = get_db()
+    cur.execute("SELECT role, msgs, nickname, warn_count FROM users WHERE user_id=%s AND peer_id=%s", (uid, pid))
+    res = cur.fetchone()
     return res if res else (0, 0, None, 0)
 
 def get_role_title(pid, lvl):
+    _, cur = get_db()
     if lvl >= 100: return "Владелец чата"
-    cursor.execute("SELECT title FROM roles_titles WHERE peer_id=%s AND role_lvl=%s", (pid, lvl))
-    res = cursor.fetchone()
-    return res[0] if res else {80: "Гл. Админ", 60: "Админ", 20: "Модератор", 0: "Участник"}.get(lvl, f"Ранг {lvl}")
+    cur.execute("SELECT title FROM roles_titles WHERE peer_id=%s AND role_lvl=%s", (pid, lvl))
+    res = cur.fetchone()
+    return res[0] if res else {80: "Гл. Админ", 60: "Админ", 20: "Модератор", 0: "Пользователь"}.get(lvl, f"Ранг {lvl}")
+
+async def get_min_role(pid, cmd):
+    _, cur = get_db()
+    cur.execute("SELECT min_lvl FROM cmd_permissions WHERE peer_id=%s AND cmd_name=%s", (pid, cmd))
+    res = cur.fetchone()
+    if res: return res[0]
+    defaults = {"kick": 20, "ban": 60, "mute": 20, "warn": 20, "unban": 60, "setrole": 100, "newrole": 100, "rnick": 40, "staff": 0, "stats": 0}
+    return defaults.get(cmd, 0)
 
 async def extract_id(message: Message):
     if message.reply_message: return message.reply_message.from_id
     text = message.text
     res = re.search(r"id(\d+)|\[id(\d+)\|", text)
     if res: return int(res.group(1) or res.group(2))
-    # Поиск по домену (ссылке)
     domain = re.search(r"vk\.com/([\w\.]+)", text)
     if domain:
         try:
@@ -87,92 +99,122 @@ async def extract_id(message: Message):
 
 @bot.on.message()
 async def handler(message: Message):
-    if not message.text or message.from_id <= 0: return
-    uid, pid = message.from_id, message.peer_id
+    try:
+        if not message.text or message.from_id <= 0: return
+        
+        uid = message.from_id
+        pid = message.peer_id
+        text = message.text.strip()
 
-    # 1. Проверка мута
-    cursor.execute("SELECT id FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, pid))
-    if cursor.fetchone():
-        try: await bot.api.messages.delete(message_ids=[message.id], delete_for_all=True)
-        except: pass
-        return
+        # --- БАЗОВАЯ ПРОВЕРКА (ПИНГ) ---
+        if text.lower() in ["/ping", "!ping"]:
+            await message.answer("🏓 Понг! Я жив, ВК дает мне писать сообщения.")
+            return
 
-    # 2. Обновление активности
-    cursor.execute("INSERT INTO users (user_id, peer_id, msgs, last_seen) VALUES (%s, %s, 1, CURRENT_TIMESTAMP) ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs = users.msgs + 1, last_seen = CURRENT_TIMESTAMP", (uid, pid))
-    conn.commit()
+        _, cur = get_db()
 
-    # 3. Парсинг команды
-    pref = ("/", "!")
-    if not message.text.startswith(pref): return
-    
-    parts = message.text.split()
-    cmd = parts[0][1:].lower()
-    args = parts[1:]
-    
-    print(f">>> [COMMAND] {cmd} from {uid}") # Для логов Railway
-
-    u_role, _, _, _ = get_user_data(uid, pid)
-
-    # --- КОМАНДЫ ---
-    
-    if cmd == "sysrole" and uid == OWNER_ID:
-        target = await extract_id(message)
-        if target and args:
-            lvl = int(args[-1])
-            cursor.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (target, pid, lvl, lvl))
-            conn.commit()
-            await message.answer(f"⚡ Системно: [id{target}|пользователю] выдан ранг {lvl}.")
-
-    elif cmd == "stats":
-        target = await extract_id(message) or uid
-        r, m, n, w = get_user_data(target, pid)
-        await message.answer(f"📊 Профиль [id{target}]:\n🎭 Ник: {n or 'Нет'}\n✉ Сообщ: {m}\n⚠ Варны: {w}/3\n⭐ Роль: {get_role_title(pid, r)}")
-
-    elif cmd == "warn":
-        if u_role < 20 and uid != OWNER_ID: return
-        target = await extract_id(message)
-        if not target: return await message.answer("📌 Кого варним?")
-        cursor.execute("UPDATE users SET warn_count = warn_count + 1 WHERE user_id=%s AND peer_id=%s RETURNING warn_count", (target, pid))
-        w = cursor.fetchone()[0]
-        if w >= 3:
-            cursor.execute("UPDATE users SET warn_count = 0 WHERE user_id=%s AND peer_id=%s", (target, pid))
-            cursor.execute("INSERT INTO punishments (user_id, peer_id, type, end_at) VALUES (%s, %s, 'ban', %s)", (target, pid, datetime.now()+timedelta(days=1)))
-            conn.commit()
-            try: await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target)
+        # 1. ПРОВЕРКА МУТА
+        cur.execute("SELECT id FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, pid))
+        if cur.fetchone():
+            try: await bot.api.messages.delete(message_ids=[message.id], delete_for_all=True)
             except: pass
-            await message.answer(f"⛔ [id{target}|Бан] за 3/3 варна.")
-        else:
-            conn.commit()
-            await message.answer(f"⚠ [id{target}|Варн] ({w}/3).")
+            return
 
-    elif cmd == "staff":
-        cursor.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role > 0 ORDER BY role DESC", (pid,))
-        data = cursor.fetchall()
-        txt = "👮 Администрация:\n" + "\n".join([f"• [id{s[0]}|{get_role_title(pid, s[1])}]" for s in data])
-        await message.answer(txt if data else "Админов нет.")
+        # 2. АКТИВНОСТЬ (С авто-созданием юзера)
+        cur.execute("""
+            INSERT INTO users (user_id, peer_id, msgs, last_seen) 
+            VALUES (%s, %s, 1, CURRENT_TIMESTAMP) 
+            ON CONFLICT (user_id, peer_id) 
+            DO UPDATE SET msgs = users.msgs + 1, last_seen = CURRENT_TIMESTAMP
+        """, (uid, pid))
 
-    elif cmd == "rnick":
-        if u_role < 40 and uid != OWNER_ID: return
-        target = await extract_id(message) or uid
-        cursor.execute("UPDATE users SET nickname = NULL WHERE user_id=%s AND peer_id=%s", (target, pid))
-        conn.commit()
-        await message.answer(f"✅ Ник [id{target}|сброшен].")
+        # 3. ПАРСИНГ КОМАНД
+        if not (text.startswith("/") or text.startswith("!")): return
+        
+        parts = text[1:].split()
+        if not parts: return
+        cmd = parts[0].lower()
+        args = parts[1:]
 
-    elif cmd == "start":
-        # Назначение владельца чата
-        mems = await bot.api.messages.get_conversation_members(peer_id=pid)
-        for m in mems.items:
-            if getattr(m, 'is_owner', False):
-                cursor.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, 100) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=100", (m.member_id, pid))
-                conn.commit()
-                await message.answer(f"✅ Владелец [id{m.member_id}|назначен].")
+        print(f">>> [CMD] Выполнение /{cmd} от {uid}")
+
+        u_role, _, _, _ = get_user_data(uid, pid)
+
+        # --- СИСТЕМНЫЕ КОМАНДЫ ---
+        if cmd == "sysrole" and uid == OWNER_ID:
+            target = await extract_id(message)
+            if target and args:
+                lvl = int(args[-1])
+                cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (target, pid, lvl, lvl))
+                await message.answer(f"⚡ Системно: [id{target}|пользователю] выдан ранг {lvl}.")
+            return
+
+        # ПРОВЕРКА ПРАВ ДЛЯ ОСТАЛЬНЫХ
+        min_req = await get_min_role(pid, cmd)
+        if u_role < min_req and uid != OWNER_ID: return
+
+        # --- ЛОГИКА КОМАНД ---
+        if cmd == "stats":
+            target = await extract_id(message) or uid
+            r, m, n, w = get_user_data(target, pid)
+            await message.answer(f"📊 Профиль [id{target}]:\n🎭 Ник: {n or 'Нет'}\n✉ Сообщ: {m}\n⚠ Варны: {w}/3\n⭐ Роль: {get_role_title(pid, r)}")
+
+        elif cmd == "warn":
+            target = await extract_id(message)
+            if not target: return await message.answer("📌 Кого варним?")
+            cur.execute("UPDATE users SET warn_count = warn_count + 1 WHERE user_id=%s AND peer_id=%s RETURNING warn_count", (target, pid))
+            w = cur.fetchone()[0]
+            if w >= 3:
+                cur.execute("UPDATE users SET warn_count = 0 WHERE user_id=%s AND peer_id=%s", (target, pid))
+                cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at) VALUES (%s, %s, 'ban', %s)", (target, pid, datetime.now()+timedelta(days=1)))
+                try: await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target)
+                except: pass
+                await message.answer(f"⛔ [id{target}|Бан] за 3/3 варна.")
+            else:
+                await message.answer(f"⚠ [id{target}|Варн] ({w}/3).")
+
+        elif cmd == "staff":
+            cur.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role > 0 ORDER BY role DESC", (pid,))
+            data = cur.fetchall()
+            txt = "👮 Администрация:\n" + "\n".join([f"• [id{s[0]}|{get_role_title(pid, s[1])}]" for s in data])
+            await message.answer(txt if data else "Админов нет.")
+
+        elif cmd == "rnick":
+            target = await extract_id(message) or uid
+            cur.execute("UPDATE users SET nickname = NULL WHERE user_id=%s AND peer_id=%s", (target, pid))
+            await message.answer(f"✅ Ник [id{target}|сброшен].")
+
+        elif cmd == "start":
+            try:
+                mems = await bot.api.messages.get_conversation_members(peer_id=pid)
+                for m in mems.items:
+                    if getattr(m, 'is_owner', False):
+                        cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, 100) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=100", (m.member_id, pid))
+                        await message.answer(f"✅ Владелец [id{m.member_id}|назначен].")
+            except Exception as e:
+                await message.answer("❌ Выдайте мне админку для этой команды.")
+
+    except Exception as e:
+        # ЕСЛИ ЧТО-ТО СЛОМАЕТСЯ, БОТ БОЛЬШЕ НЕ ПРОМОЛЧИТ
+        print(f"\n{'='*30}\nКРИТИЧЕСКАЯ ОШИБКА В КОДЕ:\n{traceback.format_exc()}\n{'='*30}\n")
 
 # =========================
-# RUN
+# RUN BOT
 # =========================
+async def maintenance_task():
+    while True:
+        try:
+            _, cur = get_db()
+            now = datetime.now()
+            cur.execute("DELETE FROM punishments WHERE end_at <= %s", (now,))
+            cur.execute("DELETE FROM users WHERE last_seen < %s AND role = 0", (now - timedelta(days=30),))
+        except Exception as e:
+            print(f">>> [MAINTENANCE ERR] {e}")
+        await asyncio.sleep(60)
+
 async def main():
     asyncio.create_task(maintenance_task())
-    print(">>> БОТ ЗАПУЩЕН")
+    print(">>> [SYSTEM] БОТ И БАЗА ГОТОВЫ. ЖДУ СООБЩЕНИЙ...")
     await bot.run_polling()
 
 if __name__ == "__main__":
