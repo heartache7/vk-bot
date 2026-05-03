@@ -1,24 +1,12 @@
 import os
-
-print("VK_TOKEN =", os.getenv("VK_TOKEN"))
-print("ENV KEYS =", list(os.environ.keys()))
 import re
 import psycopg2
-from datetime import timedelta
 from vkbottle.bot import Bot, Message
-
-print("FLEX BOT WITH PARSER STARTED")
 
 OWNER_ID = 676081199
 
 VK_TOKEN = os.getenv("vk1.a.6f790amqcqoWVIoYKpyxZThiwL0tYxcC203wMm6YXLH1vXmKlPlIkDpEKkFbowjEmK-Y_nHlwjPxPSwn5GU_o4dkVaBDe9Xjeeo4iHoBSLYniLn9gQkbclJIhwd2UFgMbYb5twyJz5U-kG80dHUk5sI52R123G3pgTajWE69r3lOxMc1onWa0l-vAdedtHn-_uMxEfjrq9Ho6r-IDHK1hw")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-if not VK_TOKEN:
-    raise Exception("VK_TOKEN not set")
-
-if not DATABASE_URL:
-    raise Exception("DATABASE_URL not set")
 
 bot = Bot(token=VK_TOKEN)
 
@@ -42,8 +30,7 @@ CREATE TABLE IF NOT EXISTS punishments (
     id SERIAL PRIMARY KEY,
     user_id BIGINT,
     peer_id BIGINT,
-    type TEXT,
-    until_time TIMESTAMP
+    type TEXT
 );
 """)
 
@@ -56,29 +43,32 @@ CREATE TABLE IF NOT EXISTS activity (
 );
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS command_access (
+    peer_id BIGINT,
+    command TEXT,
+    min_role INT DEFAULT 0,
+    PRIMARY KEY (peer_id, command)
+);
+""")
+
 conn.commit()
 
 # =========================
-# UTILS
+# CORE HELPERS
 # =========================
-def parse_cmd(text: str):
-    parts = text.strip().split()
-    cmd = parts[0].lower()
-    args = parts[1:]
-    return cmd, args
+def parse_cmd(text):
+    parts = text.split()
+    return parts[0].lower(), parts[1:]
 
-def extract_user_id(message: Message, args):
-    # 1. reply
+def extract_user(message, args):
     if message.reply_message:
         return message.reply_message.from_id
 
-    # 2. @id123
     if args:
-        match = re.search(r"id(\d+)", args[0])
-        if match:
-            return int(match.group(1))
-
-        # просто число
+        m = re.search(r"id(\d+)", args[0])
+        if m:
+            return int(m.group(1))
         if args[0].isdigit():
             return int(args[0])
 
@@ -104,14 +94,28 @@ def set_role(uid, peer, role):
     """, (uid, peer, role, role))
     conn.commit()
 
-async def kick(peer_id, uid):
+def can_use(uid, peer, cmd):
+    if uid == OWNER_ID:
+        return True
+
+    cursor.execute("""
+        SELECT min_role FROM command_access
+        WHERE peer_id=%s AND command=%s
+    """, (peer, cmd))
+
+    r = cursor.fetchone()
+    need = r[0] if r else 0
+
+    return get_role(uid, peer) >= need
+
+async def kick(peer_id, user_id):
     await bot.api.messages.remove_chat_user(
         chat_id=peer_id - 2000000000,
-        user_id=uid
+        user_id=user_id
     )
 
 # =========================
-# GLOBAL HANDLER
+# MAIN HANDLER
 # =========================
 @bot.on.message()
 async def handler(message: Message):
@@ -119,7 +123,7 @@ async def handler(message: Message):
     if not message.text:
         return
 
-    # счетчик сообщений
+    # activity
     if message.peer_id > 2000000000:
         cursor.execute("""
             INSERT INTO activity (user_id, peer_id, messages)
@@ -135,7 +139,7 @@ async def handler(message: Message):
     # START
     # =========================
     if cmd == "/start":
-        await message.answer("BOT ONLINE\n/help")
+        await message.answer("BOT ONLINE")
         return
 
     # =========================
@@ -143,55 +147,47 @@ async def handler(message: Message):
     # =========================
     if cmd == "/help":
         await message.answer("""
-/ban (reply или id)
-/warn (reply)
-/mute (reply)
-/kick (reply)
-/stats
+/ban (reply or id)
+/warn (reply or id)
+/mute (reply or id)
+/kick (reply or id)
+/stats (reply or id)
+/banlist
 /sysrole (owner only)
+/setcmd
 """)
         return
 
     # =========================
-    # SYSROLE (ТОЛЬКО OWNER)
+    # SYSROLE (OWNER ONLY)
     # =========================
     if cmd == "/sysrole":
-
         if message.from_id != OWNER_ID:
             return
 
-        if not args:
-            await message.answer("используй: /sysrole (reply) 100")
-            return
-
-        uid = extract_user_id(message, args)
-        if not uid:
-            await message.answer("укажи пользователя")
+        uid = extract_user(message, args)
+        if not uid or not args:
+            await message.answer("reply/id + level")
             return
 
         try:
-            lvl = int(args[-1])
+            level = int(args[-1])
         except:
-            await message.answer("уровень должен быть числом")
             return
 
-        set_role(uid, message.peer_id, lvl)
-
-        await message.answer(f"роль {lvl} выдана")
+        set_role(uid, message.peer_id, level)
+        await message.answer("role updated")
         return
 
     # =========================
     # BAN
     # =========================
     if cmd == "/ban":
-
-        if get_role(message.from_id, message.peer_id) < 40:
-            await message.answer("⛔ no rights")
+        if not can_use(message.from_id, message.peer_id, "ban"):
             return
 
-        uid = extract_user_id(message, args)
+        uid = extract_user(message, args)
         if not uid:
-            await message.answer("reply или /ban id")
             return
 
         cursor.execute("""
@@ -201,17 +197,14 @@ async def handler(message: Message):
         conn.commit()
 
         await kick(message.peer_id, uid)
-        await message.answer("⛔ banned")
         return
 
     # =========================
     # WARN
     # =========================
     if cmd == "/warn":
-
-        uid = extract_user_id(message, args)
+        uid = extract_user(message, args)
         if not uid:
-            await message.answer("reply или /warn id")
             return
 
         cursor.execute("""
@@ -219,18 +212,14 @@ async def handler(message: Message):
             VALUES (%s, %s, 'warn')
         """, (uid, message.peer_id))
         conn.commit()
-
-        await message.answer("⚠ warn")
         return
 
     # =========================
     # MUTE
     # =========================
     if cmd == "/mute":
-
-        uid = extract_user_id(message, args)
+        uid = extract_user(message, args)
         if not uid:
-            await message.answer("reply или /mute id")
             return
 
         cursor.execute("""
@@ -238,16 +227,24 @@ async def handler(message: Message):
             VALUES (%s, %s, 'mute')
         """, (uid, message.peer_id))
         conn.commit()
+        return
 
-        await message.answer("🔇 muted")
+    # =========================
+    # KICK
+    # =========================
+    if cmd == "/kick":
+        uid = extract_user(message, args)
+        if not uid:
+            return
+
+        await kick(message.peer_id, uid)
         return
 
     # =========================
     # STATS
     # =========================
     if cmd == "/stats":
-
-        uid = extract_user_id(message, args) or message.from_id
+        uid = extract_user(message, args) or message.from_id
 
         cursor.execute("""
             SELECT messages FROM activity
@@ -259,12 +256,25 @@ async def handler(message: Message):
 
         role = get_role(uid, message.peer_id)
 
-        await message.answer(f"""
-📊 STATS
-ID: {uid}
-Role: {role}
-Messages: {msgs}
-""")
+        await message.answer(f"{uid} | role {role} | msgs {msgs}")
+        return
+
+    # =========================
+    # BANLIST
+    # =========================
+    if cmd == "/banlist":
+        cursor.execute("""
+            SELECT user_id FROM punishments
+            WHERE peer_id=%s AND type='ban'
+        """, (message.peer_id,))
+
+        rows = cursor.fetchall()
+
+        text = "BANLIST:\n"
+        for r in rows:
+            text += f"{r[0]}\n"
+
+        await message.answer(text)
         return
 
 # =========================
