@@ -37,17 +37,24 @@ def init_db():
         cur.execute("CREATE TABLE IF NOT EXISTS roles_titles (peer_id BIGINT, role_lvl INT, title TEXT, PRIMARY KEY (peer_id, role_lvl));")
         cur.execute("CREATE TABLE IF NOT EXISTS cmd_permissions (peer_id BIGINT, cmd_name TEXT, min_lvl INT, PRIMARY KEY (peer_id, cmd_name));")
 
-        # 2. ПРИНУДИТЕЛЬНОЕ ИСПРАВЛЕНИЕ СТРУКТУРЫ
-        # Добавляем колонки, если их не было
+        # 2. МИГРАЦИЯ: Исправляем ошибку с min_lvl / min_role
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='cmd_permissions' AND column_name='min_role') THEN
+                    ALTER TABLE cmd_permissions RENAME COLUMN min_role TO min_lvl;
+                END IF;
+            END $$;
+        """)
+
+        # 3. Добавление недостающих колонок в другие таблицы
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_count INT DEFAULT 0;")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT;")
         cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS peer_id BIGINT;")
         cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;")
-
-        # 3. ВАЖНО: Создаем уникальный индекс для ON CONFLICT, если его нет
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS user_peer_idx ON users (user_id, peer_id);")
         
-        print(">>> [DATABASE] Структура успешно обновлена.")
+        print(">>> [DATABASE] Структура синхронизирована.")
     except Exception as e:
         print(f">>> [DB ERROR DURING INIT] {e}")
     finally:
@@ -99,9 +106,8 @@ async def handler(message: Message):
         
         uid, pid, text = message.from_id, message.peer_id, message.text.strip()
 
-        # ЭТА КОМАНДА РАБОТАЕТ БЕЗ БАЗЫ
         if text.lower() in ["/ping", "!ping"]:
-            return await message.answer("🏓 Понг! Если ты видишь это, бот слушает чат.")
+            return await message.answer("🏓 Понг! База данных перенастроена.")
 
         conn, cur = get_db()
 
@@ -112,7 +118,7 @@ async def handler(message: Message):
             except: pass
             return
 
-        # 2. Логирование активности (Здесь чаще всего ошибка)
+        # 2. Логирование активности
         cur.execute("""
             INSERT INTO users (user_id, peer_id, msgs, last_seen) 
             VALUES (%s, %s, 1, CURRENT_TIMESTAMP) 
@@ -120,7 +126,7 @@ async def handler(message: Message):
             DO UPDATE SET msgs = users.msgs + 1, last_seen = CURRENT_TIMESTAMP
         """, (uid, pid))
 
-        # 3. Обработка команд
+        # 3. Команды
         if not (text.startswith("/") or text.startswith("!")): return
         parts = text[1:].split()
         if not parts: return
@@ -128,15 +134,13 @@ async def handler(message: Message):
 
         u_role, _, _, _ = await get_user_data(uid, pid)
         
-        # Системная выдача прав владельцем
         if cmd == "sysrole" and uid == OWNER_ID:
             target = await extract_id(message)
             if target and args:
                 lvl = int(args[-1])
                 cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (target, pid, lvl, lvl))
-                return await message.answer(f"⚡ Ранг {lvl} выдан пользователю [id{target}|id{target}].")
+                return await message.answer(f"⚡ Ранг {lvl} выдан [id{target}|пользователю].")
 
-        # Проверка прав
         min_req = await get_min_role(pid, cmd)
         if u_role < min_req and uid != OWNER_ID: return
 
@@ -169,14 +173,10 @@ async def handler(message: Message):
                         cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, 100) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=100", (m.member_id, pid))
                         await message.answer(f"✅ Владелец [id{m.member_id}|назначен].")
             except:
-                await message.answer("❌ Мне нужны права администратора чата.")
+                await message.answer("❌ Дайте боту права администратора.")
 
     except Exception as e:
-        # ЕСЛИ БУДЕТ ОШИБКА — БОТ НАПИШЕТ ЕЁ В ЧАТ
-        error_msg = f"⚠ Ошибка БД: {e}\n\n{traceback.format_exc()[-200:]}"
-        print(error_msg)
-        try: await message.answer(error_msg)
-        except: pass
+        print(f"Ошибка: {e}\n{traceback.format_exc()}")
     finally:
         if conn: conn.close()
 
