@@ -1,197 +1,194 @@
 import os
 import re
 import psycopg2
+from datetime import datetime
 from vkbottle.bot import Bot, Message
 
 # =========================
 # CONFIG
 # =========================
-# OWNER_ID остается в коде, это безопасно
 OWNER_ID = 676081199
-
-# Берем данные из переменных окружения Railway
 VK_TOKEN = os.getenv("VK_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-if not VK_TOKEN:
-    print("ОШИБКА: Переменная VK_TOKEN не найдена в Railway Variables!")
-    exit(1)
 
 bot = Bot(token=VK_TOKEN)
 
 # =========================
-# DATABASE INIT
+# DATABASE
 # =========================
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
 def init_db():
+    # Создаем основные таблицы
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS roles (
-        user_id BIGINT,
-        peer_id BIGINT,
-        role INT DEFAULT 0,
-        PRIMARY KEY (user_id, peer_id)
-    );
+    CREATE TABLE IF NOT EXISTS users (
+        user_id BIGINT, 
+        peer_id BIGINT, 
+        role INT DEFAULT 0, 
+        msgs INT DEFAULT 0,
+        PRIMARY KEY (user_id, peer_id));
     """)
+    
+    # Умное обновление: добавляем колонки, если их нет
+    cols = {
+        "invited_by": "BIGINT",
+        "invited_at": "TIMESTAMP",
+        "last_msg_at": "TIMESTAMP"
+    }
+    for col, type in cols.items():
+        cursor.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {type};")
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS punishments (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT,
-        peer_id BIGINT,
-        type TEXT
-    );
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS activity (
-        user_id BIGINT,
-        peer_id BIGINT,
-        messages INT DEFAULT 0,
-        PRIMARY KEY (user_id, peer_id)
-    );
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS command_access (
-        peer_id BIGINT,
-        command TEXT,
-        min_role INT DEFAULT 0,
-        PRIMARY KEY (peer_id, command)
-    );
+        id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT, type TEXT);
     """)
     conn.commit()
+    print(">>> База данных готова к работе.")
 
 init_db()
 
 # =========================
 # HELPERS
 # =========================
-def parse_cmd(text):
-    parts = text.split()
-    if not parts: return "", []
-    return parts[0].lower(), parts[1:]
+def get_user_data(uid, pid):
+    cursor.execute("SELECT role, msgs, invited_by, invited_at, last_msg_at FROM users WHERE user_id=%s AND peer_id=%s", (uid, pid))
+    res = cursor.fetchone()
+    if not res:
+        return (0, 0, 0, None, None)
+    # Если это владелец, принудительно ставим роль 100
+    role = 100 if uid == OWNER_ID else res[0]
+    return (role, res[1], res[2], res[3], res[4])
 
-def extract_user(message: Message, args):
+def extract_id(message: Message):
     if message.reply_message:
         return message.reply_message.from_id
-    if args:
-        m = re.search(r"id(\d+)", args[0])
-        if m: return int(m.group(1))
-        if args[0].isdigit(): return int(args[0])
+    target = re.search(r"id(\d+)", message.text)
+    if target: return int(target.group(1))
+    args = message.text.split()
+    for arg in args:
+        if arg.isdigit(): return int(arg)
     return None
 
-def get_role(uid, peer):
-    if uid == OWNER_ID: return 100
-    cursor.execute("SELECT role FROM roles WHERE user_id=%s AND peer_id=%s", (uid, peer))
-    r = cursor.fetchone()
-    return r[0] if r else 0
-
-def set_role(uid, peer, role):
-    cursor.execute("""
-        INSERT INTO roles (user_id, peer_id, role)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (user_id, peer_id)
-        DO UPDATE SET role=EXCLUDED.role
-    """, (uid, peer, role))
-    conn.commit()
-
-def can_use(uid, peer, cmd):
-    if uid == OWNER_ID: return True
-    cursor.execute("SELECT min_role FROM command_access WHERE peer_id=%s AND command=%s", (peer, cmd))
-    r = cursor.fetchone()
-    need = r[0] if r else 0
-    return get_role(uid, peer) >= need
-
-async def kick_user(peer_id, user_id):
-    # Метод работает только в беседах (peer_id > 2e9)
-    if peer_id > 2000000000:
-        try:
-            await bot.api.messages.remove_chat_user(
-                chat_id=peer_id - 2000000000,
-                user_id=user_id
-            )
-        except Exception as e:
-            print(f"Ошибка при кике: {e}")
+# =========================
+# EVENT: ОБРАБОТКА ПРИГЛАШЕНИЙ
+# =========================
+@bot.on.raw_event("message_new", dataclass=Message)
+async def invitation_handler(message: Message):
+    if message.action and message.action.type == "chat_invite_user":
+        target_id = message.action.member_id
+        inviter_id = message.from_id
+        now = datetime.now()
+        
+        cursor.execute("""
+            INSERT INTO users (user_id, peer_id, invited_by, invited_at) 
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id, peer_id) 
+            DO UPDATE SET invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at
+        """, (target_id, message.peer_id, inviter_id, now))
+        conn.commit()
 
 # =========================
-# HANDLER
+# MAIN HANDLER
 # =========================
 @bot.on.message()
 async def handler(message: Message):
-    if not message.text: return
+    if not message.text or message.from_id < 0: return
 
-    # Логика подсчета сообщений
-    if message.peer_id > 2000000000:
-        cursor.execute("""
-            INSERT INTO activity (user_id, peer_id, messages)
-            VALUES (%s, %s, 1)
-            ON CONFLICT (user_id, peer_id)
-            DO UPDATE SET messages = activity.messages + 1
-        """, (message.from_id, message.peer_id))
-        conn.commit()
+    uid, pid = message.from_id, message.peer_id
+    now = datetime.now()
+    
+    # Обновляем активность
+    cursor.execute("""
+        INSERT INTO users (user_id, peer_id, msgs, last_msg_at) VALUES (%s, %s, 1, %s)
+        ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs = users.msgs + 1, last_msg_at = %s
+    """, (uid, pid, now, now))
+    conn.commit()
 
-    cmd, args = parse_cmd(message.text)
+    text = message.text.replace("!", "/").lower()
+    args = text.split()
+    cmd = args[0] if args else ""
 
-    # --- Команды ---
+    # --- ПРОВЕРКА РОЛИ ---
+    u_role, u_msgs, u_inviter, u_at, u_last = get_user_data(uid, pid)
+
+    # --- КОМАНДЫ ДЛЯ ВСЕХ (РОЛЬ 0+) ---
+
     if cmd == "/start":
-        await message.answer("✅ Бот запущен и готов к работе!")
+        await message.answer("✅ Чат-менеджер запущен. Напишите /help.")
 
     elif cmd == "/help":
-        await message.answer(
-            "📋 Список команд:\n"
-            "/stats - твоя статистика\n"
-            "/ban [ID/reply] - бан (нужны права)\n"
-            "/kick [ID/reply] - кик\n"
-            "/banlist - список забаненных\n"
-            "/sysrole [ID] [число] - выдать роль (Owner)"
-        )
-
-    elif cmd == "/sysrole":
-        if message.from_id == OWNER_ID:
-            uid = extract_user(message, args)
-            if uid and len(args) >= 1:
-                try:
-                    role = int(args[-1])
-                    set_role(uid, message.peer_id, role)
-                    await message.answer(f"💾 Для пользователя {uid} установлена роль {role}")
-                except ValueError:
-                    await message.answer("⚠ Ошибка: роль должна быть числом")
-
-    elif cmd == "/ban":
-        if can_use(message.from_id, message.peer_id, "ban"):
-            uid = extract_user(message, args)
-            if uid:
-                cursor.execute("INSERT INTO punishments (user_id, peer_id, type) VALUES (%s, %s, 'ban')", (uid, message.peer_id))
-                conn.commit()
-                await kick_user(message.peer_id, uid)
-                await message.answer(f"🚫 Пользователь {uid} забанен.")
-
-    elif cmd == "/kick":
-        if can_use(message.from_id, message.peer_id, "kick"):
-            uid = extract_user(message, args)
-            if uid:
-                await kick_user(message.peer_id, uid)
-                await message.answer(f"👢 Пользователь {uid} исключен.")
+        help_text = "🔧 Доступные вам команды:\n/stats [id] — статистика"
+        if u_role >= 1 or uid == OWNER_ID:
+            help_text += "\n\n👮 Команды админа:\n/kick, /ban, /warn, /mute, /banlist"
+        if uid == OWNER_ID:
+            help_text += "\n👑 /sysrole [id] [role]"
+        await message.answer(help_text)
 
     elif cmd == "/stats":
-        uid = extract_user(message, args) or message.from_id
-        cursor.execute("SELECT messages FROM activity WHERE user_id=%s AND peer_id=%s", (uid, message.peer_id))
-        res = cursor.fetchone()
-        msgs = res[0] if res else 0
-        role = get_role(uid, message.peer_id)
-        await message.answer(f"📊 Статистика {uid}:\n⭐ Роль: {role}\n✉ Сообщений: {msgs}")
+        target = extract_id(message) or uid
+        t_role, t_msgs, t_inviter, t_at, t_last = get_user_data(target, pid)
+        
+        # Красивое форматирование дат
+        inv_by = f"[id{t_inviter}|Пользователем]" if t_inviter else "Неизвестно"
+        date_inv = t_at.strftime('%d.%m.%Y %H:%M') if t_at else "Нет данных"
+        last_act = t_last.strftime('%d.%m.%Y %H:%M') if t_last else "Только что"
 
-    elif cmd == "/banlist":
-        cursor.execute("SELECT user_id FROM punishments WHERE peer_id=%s AND type='ban'", (message.peer_id,))
-        rows = cursor.fetchall()
-        if not rows:
-            await message.answer("😇 Список банов пуст.")
-        else:
-            text = "🚫 Список забаненных:\n" + "\n".join([f"• id{r[0]}" for r in rows])
+        await message.answer(
+            f"📊 Статистика [id{target}|пользователя]:\n\n"
+            f"✉ Сообщений: {t_msgs}\n"
+            f"📅 Приглашён: {date_inv}\n"
+            f"👤 Кем: {inv_by}\n"
+            f"🕒 Последний актив: {last_act}\n"
+            f"⭐ Приоритет в боте: {t_role}"
+        )
+
+    # --- КОМАНДЫ ДЛЯ АДМИНОВ (ОБЫЧНЫМ ЮЗЕРАМ НЕ ОТВЕЧАЕТ) ---
+
+    elif cmd in ["/kick", "/ban", "/warn", "/mute", "/banlist", "/sysrole"]:
+        # Если юзер не админ и не владелец — игнорируем полностью
+        if u_role < 1 and uid != OWNER_ID:
+            return 
+
+        # Логика SYSROLE (Только владелец)
+        if cmd == "/sysrole":
+            if uid != OWNER_ID: return
+            target = extract_id(message)
+            if target and len(args) > 1:
+                try:
+                    new_role = int(args[-1])
+                    cursor.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=EXCLUDED.role", (target, pid, new_role))
+                    conn.commit()
+                    await message.answer(f"✅ Для [id{target}|пользователя] установлен приоритет {new_role}")
+                except: pass
+            return
+
+        # Логика Модерации
+        target = extract_id(message)
+        if not target and cmd != "/banlist":
+            await message.answer("⚠ Укажите пользователя (ID или пересланное сообщение)")
+            return
+
+        if cmd == "/kick":
+            if pid > 2000000000:
+                try:
+                    await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target)
+                    await message.answer("✅ Пользователь исключен.")
+                except: await message.answer("❌ Ошибка: я должен быть администратором беседы.")
+        
+        elif cmd == "/banlist":
+            cursor.execute("SELECT DISTINCT user_id FROM punishments WHERE peer_id=%s AND type='ban'", (pid,))
+            rows = cursor.fetchall()
+            text = "🚫 Список забаненных в этой беседе:\n" + "\n".join([f"• id{r[0]}" for r in rows]) if rows else "Список пуст."
             await message.answer(text)
 
-# =========================
-# RUN
-# =========================
+        else: # ban, warn, mute
+            cursor.execute("INSERT INTO punishments (user_id, peer_id, type) VALUES (%s, %s, %s)", (target, pid, cmd[1:]))
+            conn.commit()
+            if cmd == "/ban" and pid > 2000000000:
+                try: await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=target)
+                except: pass
+            await message.answer(f"✅ Команда {cmd} применена к [id{target}|пользователю].")
+
 if __name__ == "__main__":
-    print("Бот запущен...")
     bot.run_forever()
