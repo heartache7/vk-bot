@@ -1,4 +1,7 @@
 import os
+
+print("VK_TOKEN =", os.getenv("VK_TOKEN"))
+print("ENV KEYS =", list(os.environ.keys()))
 import re
 import psycopg2
 from datetime import timedelta
