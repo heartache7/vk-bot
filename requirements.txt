@@ -1,3 +1,2 @@
-vkbottle==4.3.12
+vkbottle>=4.3.12
 psycopg2-binary
-pydantic<2.0.0
