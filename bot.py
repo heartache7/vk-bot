@@ -1,7 +1,7 @@
 from vkbottle.bot import Bot, Message
 
 # ВСТАВЬ СЮДА СВОЙ ТОКЕН
-bot = Bot(token="vk1.a.ZTiuYTvGy_O_v5C851uFyvh5vnHrJcoOzvE6dOUdqxEsicPpfKDrS7c8-GthxyBhM9BhGD9es6WtBalvFI89AWm-ME75iWsEdg5JoHyyU20uuT4LrIQnxyS0vJiS2SPF4RPwsSxdtekCBn0wYRV0H2lT0kyQYwwmTXpta7UUfSzaDafRjXuw1Pdpih6EaSC0FEHTVRKYN_IniAii_eSO-w")
+bot = Bot(token="vk1.a.6f790amqcqoWVIoYKpyxZThiwL0tYxcC203wMm6YXLH1vXmKlPlIkDpEKkFbowjEmK-Y_nHlwjPxPSwn5GU_o4dkVaBDe9Xjeeo4iHoBSLYniLn9gQkbclJIhwd2UFgMbYb5twyJz5U-kG80dHUk5sI52R123G3pgTajWE69r3lOxMc1onWa0l-vAdedtHn-_uMxEfjrq9Ho6r-IDHK1hw")
 @bot.on.message()
 async def handler(message: Message):
     await message.answer("Бот работает 24/7 🚀")
