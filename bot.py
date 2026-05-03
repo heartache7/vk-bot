@@ -22,32 +22,45 @@ def db():
 
 def init():
     conn, cur = db()
+    try:
+        # ===== CREATE TABLE =====
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users(
+            user_id BIGINT,
+            peer_id BIGINT
+        );
+        """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users(
-        user_id BIGINT,
-        peer_id BIGINT,
-        role INT DEFAULT 0,
-        msgs INT DEFAULT 0,
-        nickname TEXT,
-        warn_count INT DEFAULT 0,
-        warn_reasons TEXT DEFAULT ''
-    );
-    """)
+        # ===== AUTO FIX STRUCTURE =====
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role INT DEFAULT 0;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS msgs INT DEFAULT 0;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_count INT DEFAULT 0;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_reasons TEXT DEFAULT '';")
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS punishments(
-        user_id BIGINT,
-        peer_id BIGINT,
-        type TEXT,
-        end_at TIMESTAMP,
-        reason TEXT
-    );
-    """)
+        cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS users_unique
+        ON users(user_id, peer_id);
+        """)
 
-    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS up ON users(user_id,peer_id);")
+        # ===== PUNISHMENTS =====
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS punishments(
+            user_id BIGINT,
+            peer_id BIGINT,
+            type TEXT
+        );
+        """)
 
-    conn.close()
+        cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;")
+        cur.execute("ALTER TABLE punishments ADD COLUMN IF NOT EXISTS reason TEXT;")
+
+        print(">>> DB OK")
+
+    except Exception as e:
+        print("DB ERROR:", e)
+    finally:
+        conn.close()
 
 init()
 
@@ -67,45 +80,11 @@ def extract(msg: Message):
     return int(r.group(1) or r.group(2)) if r else None
 
 # =========================
-# HELP
-# =========================
-HELP = """
-💠 FLEX BOT
-
-👤 Профиль:
-• /stats — информация о пользователе
-
-🏷 Ник:
-• /snick [ник] — себе
-• /snick [id] [ник] — другому
-• /rnick — удалить себе
-• /rnick [id] — удалить другому
-
-⚠ Варны:
-• /warn [id] [причина]
-• /unwarn [id]
-
-🔇 Мут:
-• /mute [id] [время] [причина]
-• /unmute [id]
-
-🚫 Бан:
-• /ban [id] [дни] [причина]
-• /unban [id]
-
-👢 Кик:
-• /kick [id]
-
-⏱ Время: 10m / 2h / 1d
-"""
-
-# =========================
 # START
 # =========================
 @bot.on.message(text="/start")
 async def start(msg: Message):
     conn, cur = db()
-
     try:
         try:
             res = await bot.api.messages.get_conversation_members(peer_id=msg.peer_id)
@@ -115,13 +94,13 @@ async def start(msg: Message):
         for m in res.items:
             if getattr(m, "is_owner", False):
                 cur.execute("""
-                INSERT INTO users (user_id,peer_id,role,msgs,nickname,warn_count,warn_reasons)
-                VALUES (%s,%s,100,0,NULL,0,'')
+                INSERT INTO users (user_id,peer_id,role)
+                VALUES (%s,%s,100)
                 ON CONFLICT (user_id,peer_id)
                 DO UPDATE SET role=100
                 """, (m.member_id, msg.peer_id))
 
-                return await msg.answer("👑 Владелец чата получил роль 100")
+                return await msg.answer("👑 Владелец получил роль 100")
 
     finally:
         conn.close()
@@ -138,7 +117,47 @@ async def handler(msg: Message):
             return
 
         uid, pid = msg.from_id, msg.peer_id
-        text = msg.text
+        text = msg.text.strip()
+
+        # ===== AUTO KICK BAN =====
+        cur.execute("""
+        SELECT type FROM punishments
+        WHERE user_id=%s AND peer_id=%s AND type='ban'
+        """, (uid, pid))
+
+        if cur.fetchone():
+            try:
+                await bot.api.messages.remove_chat_user(
+                    chat_id=pid-2000000000,
+                    user_id=uid
+                )
+            except:
+                pass
+            return
+
+        # ===== AUTO DELETE MUTE =====
+        cur.execute("""
+        SELECT type FROM punishments
+        WHERE user_id=%s AND peer_id=%s AND type='mute'
+        """, (uid, pid))
+
+        if cur.fetchone():
+            try:
+                await bot.api.messages.delete(
+                    message_ids=[msg.id],
+                    delete_for_all=True
+                )
+            except:
+                pass
+            return
+
+        # ===== UPDATE USER =====
+        cur.execute("""
+        INSERT INTO users (user_id,peer_id,msgs)
+        VALUES (%s,%s,1)
+        ON CONFLICT (user_id,peer_id)
+        DO UPDATE SET msgs = users.msgs + 1
+        """, (uid, pid))
 
         if not text.startswith("/"):
             return
@@ -147,27 +166,29 @@ async def handler(msg: Message):
         cmd = parts[0][1:].lower()
         args = parts[1:]
 
-        # ===== HELP
+        # ===== HELP =====
         if cmd == "help":
-            return await msg.answer(HELP)
+            return await msg.answer(
+                "💠 FLEX BOT\n\n"
+                "🏷 /snick [ник]\n"
+                "🧹 /rnick\n"
+                "⚠ /warn\n"
+                "🔇 /mute\n"
+                "🚫 /ban\n"
+                "👢 /kick\n"
+            )
 
-        # ===== SNICK
+        # ===== SNICK =====
         if cmd == "snick":
             target = extract(msg) or uid
 
-            # если указан id в тексте → убираем его из args
-            if args and (args[0].startswith("id") or args[0].startswith("[id")):
+            if args and ("id" in args[0]):
                 args = args[1:]
 
             if not args:
-                return await msg.answer(
-                    "🏷 Использование:\n"
-                    "• /snick [ник]\n"
-                    "• /snick [id] [ник]\n\n"
-                    "Пример:\n/snicky Flex\n/snick @user Админ"
-                )
+                return await msg.answer("📖 /snick [ник] или /snick [id] [ник]")
 
-            nick = " ".join(args)[:20]
+            nick = " ".join(args)
 
             cur.execute("""
             INSERT INTO users (user_id,peer_id,nickname)
@@ -176,13 +197,9 @@ async def handler(msg: Message):
             DO UPDATE SET nickname=%s
             """, (target, pid, nick, nick))
 
-            return await msg.answer(
-                f"🏷 Ник обновлён\n"
-                f"👤 [id{target}|пользователь]\n"
-                f"✏ Новый ник: {nick}"
-            )
+            return await msg.answer(f"🏷 Ник установлен: {nick}")
 
-        # ===== RNICK
+        # ===== RNICK =====
         if cmd == "rnick":
             target = extract(msg) or uid
 
@@ -191,10 +208,7 @@ async def handler(msg: Message):
             WHERE user_id=%s AND peer_id=%s
             """, (target, pid))
 
-            return await msg.answer(
-                f"🧹 Ник удалён\n"
-                f"👤 [id{target}|пользователь]"
-            )
+            return await msg.answer("🧹 Ник удалён")
 
     except:
         print(traceback.format_exc())
@@ -203,4 +217,5 @@ async def handler(msg: Message):
 
 # =========================
 if __name__ == "__main__":
+    print(">>> BOT START")
     bot.run_forever()
