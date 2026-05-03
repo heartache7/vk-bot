@@ -14,7 +14,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 bot = Bot(token=VK_TOKEN)
 
 # =========================
-# DB
+# DATABASE
 # =========================
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
@@ -119,7 +119,7 @@ async def kick(peer_id, user_id):
     )
 
 # =========================
-# MAIN HANDLER
+# HANDLER
 # =========================
 @bot.on.message()
 async def handler(message: Message):
@@ -127,7 +127,7 @@ async def handler(message: Message):
     if not message.text:
         return
 
-    # activity counter
+    # activity
     if message.peer_id > 2000000000:
         cursor.execute("""
             INSERT INTO activity (user_id, peer_id, messages)
@@ -157,7 +157,7 @@ async def handler(message: Message):
 /kick (reply or id)
 /stats
 /banlist
-/sysrole (owner only)
+/sysrole
 """)
         return
 
