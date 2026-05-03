@@ -3,29 +3,22 @@ import re
 import psycopg2
 from vkbottle.bot import Bot, Message
 
+# =========================
+# CONFIG
+# =========================
 OWNER_ID = 676081199
 
 VK_TOKEN = os.getenv("vk1.a.6f790amqcqoWVIoYKpyxZThiwL0tYxcC203wMm6YXLH1vXmKlPlIkDpEKkFbowjEmK-Y_nHlwjPxPSwn5GU_o4dkVaBDe9Xjeeo4iHoBSLYniLn9gQkbclJIhwd2UFgMbYb5twyJz5U-kG80dHUk5sI52R123G3pgTajWE69r3lOxMc1onWa0l-vAdedtHn-_uMxEfjrq9Ho6r-IDHK1hw")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-print("TOKEN LOADED:", VK_TOKEN is not None)
-
-print(requests.get(
-    "https://api.vk.com/method/groups.getById",
-    params={
-        "access_token": VK_TOKEN,
-        "v": "5.199"
-    }
-).text)
-
 bot = Bot(token=VK_TOKEN)
 
+# =========================
+# DB
+# =========================
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
-# =========================
-# TABLES
-# =========================
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS roles (
     user_id BIGINT,
@@ -65,22 +58,23 @@ CREATE TABLE IF NOT EXISTS command_access (
 conn.commit()
 
 # =========================
-# CORE HELPERS
+# HELPERS
 # =========================
 def parse_cmd(text):
     parts = text.split()
     return parts[0].lower(), parts[1:]
 
-def extract_user(message, args):
+def extract_user(message: Message, args):
     if message.reply_message:
         return message.reply_message.from_id
 
     if args:
+        if args[0].isdigit():
+            return int(args[0])
+
         m = re.search(r"id(\d+)", args[0])
         if m:
             return int(m.group(1))
-        if args[0].isdigit():
-            return int(args[0])
 
     return None
 
@@ -161,15 +155,14 @@ async def handler(message: Message):
 /warn (reply or id)
 /mute (reply or id)
 /kick (reply or id)
-/stats (reply or id)
+/stats
 /banlist
 /sysrole (owner only)
-/setcmd
 """)
         return
 
     # =========================
-    # SYSROLE (OWNER ONLY)
+    # SYSROLE (ONLY OWNER)
     # =========================
     if cmd == "/sysrole":
         if message.from_id != OWNER_ID:
@@ -177,15 +170,14 @@ async def handler(message: Message):
 
         uid = extract_user(message, args)
         if not uid or not args:
-            await message.answer("reply/id + level")
             return
 
         try:
-            level = int(args[-1])
+            role = int(args[-1])
         except:
             return
 
-        set_role(uid, message.peer_id, level)
+        set_role(uid, message.peer_id, role)
         await message.answer("role updated")
         return
 
