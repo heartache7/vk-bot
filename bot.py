@@ -8,6 +8,16 @@ OWNER_ID = 676081199
 VK_TOKEN = os.getenv("vk1.a.6f790amqcqoWVIoYKpyxZThiwL0tYxcC203wMm6YXLH1vXmKlPlIkDpEKkFbowjEmK-Y_nHlwjPxPSwn5GU_o4dkVaBDe9Xjeeo4iHoBSLYniLn9gQkbclJIhwd2UFgMbYb5twyJz5U-kG80dHUk5sI52R123G3pgTajWE69r3lOxMc1onWa0l-vAdedtHn-_uMxEfjrq9Ho6r-IDHK1hw")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+print("TOKEN LOADED:", VK_TOKEN is not None)
+
+print(requests.get(
+    "https://api.vk.com/method/groups.getById",
+    params={
+        "access_token": VK_TOKEN,
+        "v": "5.199"
+    }
+).text)
+
 bot = Bot(token=VK_TOKEN)
 
 conn = psycopg2.connect(DATABASE_URL)
