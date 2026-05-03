@@ -3,14 +3,24 @@ import psycopg2
 import time
 import os
 
+# =========================
+# BOT TOKEN
+# =========================
 bot = Bot("vk1.a.6f790amqcqoWVIoYKpyxZThiwL0tYxcC203wMm6YXLH1vXmKlPlIkDpEKkFbowjEmK-Y_nHlwjPxPSwn5GU_o4dkVaBDe9Xjeeo4iHoBSLYniLn9gQkbclJIhwd2UFgMbYb5twyJz5U-kG80dHUk5sI52R123G3pgTajWE69r3lOxMc1onWa0l-vAdedtHn-_uMxEfjrq9Ho6r-IDHK1hw")
 
+# =========================
+# DATABASE
+# =========================
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
 OWNER_ID = 676081199
+
+# =========================
+# CHAT START CONTROL
+# =========================
+bot_started = {}
 
 # =========================
 # INIT DB
@@ -53,10 +63,13 @@ def chat_id(peer_id):
 def is_chat(msg):
     return msg.peer_id > 2000000000
 
+def check_started(msg):
+    return bot_started.get(msg.peer_id, False)
+
 def create_user(uid, chat):
     cur.execute("""
         INSERT INTO users (user_id, chat_id, joined)
-        VALUES (%s, %s, %s)
+        VALUES (%s,%s,%s)
         ON CONFLICT DO NOTHING
     """, (uid, chat, now()))
     conn.commit()
@@ -76,44 +89,66 @@ def get_role(uid, chat):
 def set_role(uid, chat, role):
     cur.execute("""
         INSERT INTO users (user_id, chat_id, role, joined)
-        VALUES (%s, %s, %s, %s)
+        VALUES (%s,%s,%s,%s)
         ON CONFLICT (user_id, chat_id)
         DO UPDATE SET role=%s
     """, (uid, chat, role, now(), role))
     conn.commit()
 
-def add_msg(uid, chat):
-    create_user(uid, chat)
-    cur.execute("""
-        UPDATE users SET messages = messages + 1
-        WHERE user_id=%s AND chat_id=%s
-    """, (uid, chat))
-    conn.commit()
-
 def target(msg: Message):
     return msg.reply_message.from_id if msg.reply_message else None
+
+def can(msg, need):
+    return get_role(msg.from_id, chat_id(msg.peer_id)) >= need
+
+# =========================
+# START COMMAND (ADMIN CHECK)
+# =========================
+@bot.on.message(text="/start")
+async def start(msg: Message):
+    peer = msg.peer_id
+
+    try:
+        await bot.api.messages.get_conversations_by_id(peer_ids=peer)
+    except Exception:
+        bot_started[peer] = False
+        return await msg.answer(
+            "❌ У бота нет прав администратора.\n"
+            "Добавьте бота в админы беседы.\n"
+            "Работа невозможна."
+        )
+
+    bot_started[peer] = True
+    await msg.answer("✅ Бот запущен!")
 
 # =========================
 # MESSAGE TRACK
 # =========================
 @bot.on.message()
-async def track(msg: Message):
+async def tracker(msg: Message):
     if not is_chat(msg):
         return
 
-    add_msg(msg.from_id, chat_id(msg.peer_id))
+    if not check_started(msg):
+        return
 
-# =========================
-# ROLE CHECK
-# =========================
-def can(msg, need):
-    return get_role(msg.from_id, chat_id(msg.peer_id)) >= need
+    create_user(msg.from_id, chat_id(msg.peer_id))
+
+    cur.execute("""
+        UPDATE users SET messages = messages + 1
+        WHERE user_id=%s AND chat_id=%s
+    """, (msg.from_id, chat_id(msg.peer_id)))
+
+    conn.commit()
 
 # =========================
 # BAN
 # =========================
 @bot.on.message(text="/ban <reason>")
 async def ban(msg: Message, reason: str):
+    if not check_started(msg):
+        return await msg.answer("❌ Бот не запущен (/start)")
+
     if not can(msg, 40):
         return await msg.answer("❌ No access")
 
@@ -132,13 +167,16 @@ async def ban(msg: Message, reason: str):
         member_id=uid
     )
 
-    await msg.answer(f"🚫 Banned {uid}")
+    await msg.answer(f"🚫 BANNED {uid}")
 
 # =========================
 # MUTE
 # =========================
 @bot.on.message(text="/mute <days> <reason>")
 async def mute(msg: Message, days: int, reason: str):
+    if not check_started(msg):
+        return await msg.answer("❌ Бот не запущен (/start)")
+
     if not can(msg, 30):
         return await msg.answer("❌ No access")
 
@@ -154,13 +192,16 @@ async def mute(msg: Message, days: int, reason: str):
     """, (uid, chat_id(msg.peer_id), reason, until, msg.from_id, now()))
     conn.commit()
 
-    await msg.answer(f"🔇 Muted {uid} for {days} days")
+    await msg.answer(f"🔇 MUTED {uid}")
 
 # =========================
 # SET ROLE
 # =========================
 @bot.on.message(text="/setrole <role>")
 async def role(msg: Message, role: int):
+    if not check_started(msg):
+        return await msg.answer("❌ Бот не запущен (/start)")
+
     if not can(msg, 80):
         return await msg.answer("❌ No access")
 
@@ -170,20 +211,22 @@ async def role(msg: Message, role: int):
 
     set_role(uid, chat_id(msg.peer_id), role)
 
-    await msg.answer(f"👑 Role {uid} → {role}")
+    await msg.answer(f"👑 ROLE {uid} → {role}")
 
 # =========================
 # STATS
 # =========================
 @bot.on.message(text="/stats")
 async def stats(msg: Message):
+    if not check_started(msg):
+        return await msg.answer("❌ Бот не запущен (/start)")
+
     uid = msg.from_id
-    chat = chat_id(msg.peer_id)
 
     cur.execute("""
         SELECT messages, role, joined FROM users
         WHERE user_id=%s AND chat_id=%s
-    """, (uid, chat))
+    """, (uid, chat_id(msg.peer_id)))
 
     r = cur.fetchone()
 
@@ -203,6 +246,9 @@ async def stats(msg: Message):
 # =========================
 @bot.on.message(text="/banlist")
 async def banlist(msg: Message):
+    if not check_started(msg):
+        return await msg.answer("❌ Бот не запущен (/start)")
+
     cur.execute("""
         SELECT user_id, reason, created FROM punishments
         WHERE chat_id=%s AND type='ban'
@@ -225,6 +271,9 @@ async def banlist(msg: Message):
 @bot.on.message()
 async def mute_guard(msg: Message):
     if not is_chat(msg):
+        return
+
+    if not check_started(msg):
         return
 
     uid = msg.from_id
