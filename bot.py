@@ -1,24 +1,34 @@
 import os
 import psycopg2
-from datetime import datetime, timedelta
 from vkbottle.bot import Bot, Message
 
-print("FLEX FINAL SYSTEM ONLINE")
+print("BOT STARTED (PRODUCTION MODE)")
 
 # =========================
-# DB CONNECT
+# DB (FROM RAILWAY VARIABLES)
 # =========================
-conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise Exception("DATABASE_URL is not set in Railway Variables")
+
+conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
+
+# =========================
+# CONFIG
+# =========================
+OWNER_ID = 676081199
+bot = Bot(token=os.getenv("vk1.a.6f790amqcqoWVIoYKpyxZThiwL0tYxcC203wMm6YXLH1vXmKlPlIkDpEKkFbowjEmK-Y_nHlwjPxPSwn5GU_o4dkVaBDe9Xjeeo4iHoBSLYniLn9gQkbclJIhwd2UFgMbYb5twyJz5U-kG80dHUk5sI52R123G3pgTajWE69r3lOxMc1onWa0l-vAdedtHn-_uMxEfjrq9Ho6r-IDHK1hw"))
 
 # =========================
 # TABLES
 # =========================
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS roles (
+CREATE TABLE IF NOT EXISTS activity (
     user_id BIGINT,
     peer_id BIGINT,
-    role INT DEFAULT 0,
+    messages INT DEFAULT 0,
     PRIMARY KEY (user_id, peer_id)
 );
 """)
@@ -29,73 +39,17 @@ CREATE TABLE IF NOT EXISTS punishments (
     user_id BIGINT,
     peer_id BIGINT,
     type TEXT,
-    reason TEXT,
-    until_time TIMESTAMP
-);
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS command_access (
-    peer_id BIGINT,
-    command TEXT,
-    min_role INT DEFAULT 0,
-    PRIMARY KEY (peer_id, command)
-);
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS activity (
-    user_id BIGINT,
-    peer_id BIGINT,
-    messages INT DEFAULT 0,
-    PRIMARY KEY (user_id, peer_id)
+    reason TEXT
 );
 """)
 
 conn.commit()
 
 # =========================
-# BOT
+# OWNER CHECK
 # =========================
-bot = Bot(token=os.getenv("vk1.a.6f790amqcqoWVIoYKpyxZThiwL0tYxcC203wMm6YXLH1vXmKlPlIkDpEKkFbowjEmK-Y_nHlwjPxPSwn5GU_o4dkVaBDe9Xjeeo4iHoBSLYniLn9gQkbclJIhwd2UFgMbYb5twyJz5U-kG80dHUk5sI52R123G3pgTajWE69r3lOxMc1onWa0l-vAdedtHn-_uMxEfjrq9Ho6r-IDHK1hw"))
-OWNER_ID = int(os.getenv("676081199", "0"))
-
-# =========================
-# ROLE SYSTEM
-# =========================
-def role(uid, peer):
-    cursor.execute("SELECT role FROM roles WHERE user_id=%s AND peer_id=%s", (uid, peer))
-    r = cursor.fetchone()
-    return r[0] if r else 0
-
-
-def can(uid, peer, cmd):
-    cursor.execute("SELECT min_role FROM command_access WHERE peer_id=%s AND command=%s", (peer, cmd))
-    r = cursor.fetchone()
-    minr = r[0] if r else 0
-    return role(uid, peer) >= minr
-
-
-# =========================
-# VK KICK
-# =========================
-async def kick(peer_id, user_id):
-    await bot.api.messages.remove_chat_user(
-        chat_id=peer_id - 2000000000,
-        user_id=user_id
-    )
-
-
-# =========================
-# CLEAN EXPIRED
-# =========================
-async def clean():
-    cursor.execute("""
-        DELETE FROM punishments
-        WHERE until_time IS NOT NULL AND until_time <= NOW()
-    """)
-    conn.commit()
-
+def is_owner(uid):
+    return uid == OWNER_ID
 
 # =========================
 # MESSAGE COUNTER
@@ -105,6 +59,104 @@ async def counter(message: Message):
 
     if message.peer_id < 2000000000:
         return
+
+    cursor.execute("""
+        INSERT INTO activity (user_id, peer_id, messages)
+        VALUES (%s, %s, 1)
+        ON CONFLICT (user_id, peer_id)
+        DO UPDATE SET messages = activity.messages + 1
+    """, (message.from_id, message.peer_id))
+
+    conn.commit()
+
+# =========================
+# START
+# =========================
+@bot.on.message(text="/start")
+async def start(message: Message):
+    await message.answer("BOT ONLINE ✅")
+
+# =========================
+# BAN
+# =========================
+@bot.on.message(text="/ban")
+async def ban(message: Message):
+
+    if not is_owner(message.from_id):
+        await message.answer("⛔ no rights")
+        return
+
+    if not message.reply_message:
+        await message.answer("reply → /ban")
+        return
+
+    uid = message.reply_message.from_id
+
+    cursor.execute("""
+        INSERT INTO punishments (user_id, peer_id, type, reason)
+        VALUES (%s, %s, 'ban', 'manual')
+    """, (uid, message.peer_id))
+
+    conn.commit()
+
+    await bot.api.messages.remove_chat_user(
+        chat_id=message.peer_id - 2000000000,
+        user_id=uid
+    )
+
+    await message.answer("⛔ banned")
+
+# =========================
+# STATS
+# =========================
+@bot.on.message(text="/stats")
+async def stats(message: Message):
+
+    uid = message.reply_message.from_id if message.reply_message else message.from_id
+
+    cursor.execute("""
+        SELECT messages FROM activity
+        WHERE user_id=%s AND peer_id=%s
+    """, (uid, message.peer_id))
+
+    res = cursor.fetchone()
+    msgs = res[0] if res else 0
+
+    await message.answer(f"""
+📊 STATS
+
+ID: {uid}
+Messages: {msgs}
+""")
+
+# =========================
+# WARN (SIMPLE)
+# =========================
+@bot.on.message(text="/warn")
+async def warn(message: Message):
+
+    if not is_owner(message.from_id):
+        return
+
+    if not message.reply_message:
+        await message.answer("reply → /warn")
+        return
+
+    uid = message.reply_message.from_id
+
+    cursor.execute("""
+        INSERT INTO punishments (user_id, peer_id, type, reason)
+        VALUES (%s, %s, 'warn', 'warn')
+    """, (uid, message.peer_id))
+
+    conn.commit()
+
+    await message.answer("⚠ warned")
+
+# =========================
+# RUN
+# =========================
+bot.run_forever()        return
 
     cursor.execute("""
         INSERT INTO activity (user_id, peer_id, messages)
