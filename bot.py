@@ -7,7 +7,7 @@ from vkbottle.dispatch.rules.base import ChatActionRule
 # =========================
 # CONFIG
 # =========================
-OWNER_ID = 676081199
+OWNER_ID = 676081199  # Твой ID (Владелец бота)
 VK_TOKEN = os.getenv("VK_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -38,7 +38,6 @@ def init_db():
         peer_id BIGINT, cmd_name TEXT, min_lvl INT,
         PRIMARY KEY (peer_id, cmd_name));
     """)
-    # Проверка колонки nickname (фикс ошибки из логов)
     cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='nickname';")
     if not cursor.fetchone():
         cursor.execute("ALTER TABLE users ADD COLUMN nickname TEXT;")
@@ -59,19 +58,18 @@ def get_user_data(uid, pid):
         return (0, 0, None)
 
 async def get_min_role(pid, cmd):
-    # Пытаемся достать из базы, если нет — берем стандарт
     cursor.execute("SELECT min_lvl FROM cmd_permissions WHERE peer_id=%s AND cmd_name=%s", (pid, cmd))
     res = cursor.fetchone()
     if res: return res[0]
     
     defaults = {
         "kick": 20, "ban": 60, "setrole": 100, "newrole": 100, 
-        "setcmd": 100, "snick": 0, "stats": 0, "staff": 0
+        "setcmd": 100, "snick": 0, "stats": 0, "staff": 0, "rnick": 40
     }
     return defaults.get(cmd, 0)
 
 def get_role_title(pid, lvl):
-    if lvl >= 100: return "Создатель"
+    if lvl >= 100: return "Владелец чата"
     cursor.execute("SELECT title FROM roles_titles WHERE peer_id=%s AND role_lvl=%s", (pid, lvl))
     res = cursor.fetchone()
     if res: return res[0]
@@ -92,17 +90,22 @@ async def extract_id(message: Message):
 # HANDLERS
 # =========================
 
-# Приветствие
 @bot.on.chat_message(ChatActionRule(["chat_invite_user", "chat_invite_user_by_link"]))
-async def welcome(message: Message):
-    tid = message.action.member_id or message.from_id
-    await message.answer(f"👋 Приветствуем, [id{tid}|нового участника]! Напиши /help.")
+async def welcome_handler(message: Message):
+    group_info = await bot.api.groups.get_by_id()
+    bot_id = -group_info[0].id
+    target_id = message.action.member_id or message.from_id
+    if target_id == bot_id:
+        await message.answer("🤖 FLEX Чат-менеджер на связи! Дайте мне права админа и напишите /start.")
+    else:
+        await message.answer(f"👋 Приветствуем, [id{target_id}|нового участника]! Напиши /help.")
 
 @bot.on.message()
 async def main_handler(message: Message):
     if not message.text or message.from_id <= 0: return
     uid, pid = message.from_id, message.peer_id
 
+    # Регистрация активности
     try:
         cursor.execute("INSERT INTO users (user_id, peer_id, msgs) VALUES (%s, %s, 1) ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs = users.msgs + 1", (uid, pid))
         conn.commit()
@@ -113,11 +116,27 @@ async def main_handler(message: Message):
     parts = text.split()
     cmd, args = parts[0][1:].lower(), parts[1:]
 
+    # ПРОВЕРКА ПРАВ
     u_role, _, _ = get_user_data(uid, pid)
+    
+    # --- КОМАНДА ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА БОТА ---
+    if cmd == "sysrole":
+        if uid != OWNER_ID: return # Бот просто проигнорирует не владельца
+        target = await extract_id(message)
+        if not target or not args: return await message.answer("📌 /sysrole [ссылка] [lvl]")
+        try:
+            lvl = int(args[-1])
+            cursor.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s, %s, %s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (target, pid, lvl, lvl))
+            conn.commit()
+            await message.answer(f"⚡ [id{uid}|Системное действие]: Ранг {lvl} выдан [id{target}|пользователю].")
+        except: pass
+        return
+
+    # Проверка минимальных прав для остальных команд
     min_req = await get_min_role(pid, cmd)
     if u_role < min_req and uid != OWNER_ID: return
 
-    # --- КОМАНДЫ ---
+    # --- ОСТАЛЬНЫЕ КОМАНДЫ ---
 
     if cmd == "start":
         members = await bot.api.messages.get_conversation_members(peer_id=pid)
@@ -125,16 +144,11 @@ async def main_handler(message: Message):
             if getattr(m, 'is_owner', False):
                 cursor.execute("UPDATE users SET role=100 WHERE user_id=%s AND peer_id=%s", (m.member_id, pid))
                 conn.commit()
-                await message.answer(f"✅ Владелец [id{m.member_id}|назначен].")
+                await message.answer(f"✅ Владелец чата [id{m.member_id}|определен].")
         return
 
     if cmd == "help":
-        await message.answer(
-            "📖 Команды чата:\n"
-            "👤 /stats, /snick, /staff\n"
-            "👮 /kick, /ban\n"
-            "👑 /setrole, /newrole, /setcmd"
-        )
+        await message.answer("📖 Команды:\n👤 /stats, /snick, /staff\n👮 /kick, /ban, /rnick\n👑 /setrole, /newrole, /setcmd")
         return
 
     if cmd == "newrole":
@@ -143,8 +157,8 @@ async def main_handler(message: Message):
             lvl, name = int(args[0]), " ".join(args[1:])
             cursor.execute("INSERT INTO roles_titles (peer_id, role_lvl, title) VALUES (%s, %s, %s) ON CONFLICT (peer_id, role_lvl) DO UPDATE SET title=%s", (pid, lvl, name, name))
             conn.commit()
-            await message.answer(f"✅ Роль уровня {lvl} названа: {name}")
-        except: await message.answer("❌ Ошибка в данных.")
+            await message.answer(f"✅ Роль уровня {lvl} теперь: {name}")
+        except: pass
         return
 
     if cmd == "setcmd":
@@ -153,8 +167,8 @@ async def main_handler(message: Message):
             c_name, c_lvl = args[0].lower(), int(args[1])
             cursor.execute("INSERT INTO cmd_permissions (peer_id, cmd_name, min_lvl) VALUES (%s, %s, %s) ON CONFLICT (peer_id, cmd_name) DO UPDATE SET min_lvl=%s", (pid, c_name, c_lvl, c_lvl))
             conn.commit()
-            await message.answer(f"✅ Команда /{c_name} доступна с ранга {c_lvl}.")
-        except: await message.answer("❌ Ошибка!")
+            await message.answer(f"✅ Команда /{c_name} теперь с ранга {c_lvl}.")
+        except: pass
         return
 
     if cmd == "stats":
@@ -163,15 +177,26 @@ async def main_handler(message: Message):
         await message.answer(f"📊 [id{target}|Профиль]:\n🎭 Ник: {n or 'Нет'}\n✉ Сообщений: {m}\n⭐ Роль: {get_role_title(pid, r)}")
         return
 
+    if cmd == "snick":
+        new_nick = " ".join(args)
+        if not new_nick: return await message.answer("📌 /snick [ник]")
+        cursor.execute("UPDATE users SET nickname=%s WHERE user_id=%s AND peer_id=%s", (new_nick[:20], uid, pid))
+        conn.commit()
+        await message.answer(f"✅ Твой ник: {new_nick}")
+        return
+
     if cmd == "setrole":
         target = await extract_id(message)
         if not target or not args: return await message.answer("📌 /setrole [ссылка] [lvl]")
         try:
             lvl = int(args[-1])
+            # Владелец чата не может выдать роль выше или равную 100 другому человеку, только Владелец Бота может через /sysrole
+            if lvl >= 100 and uid != OWNER_ID: 
+                return await message.answer("❌ Вы не можете назначать создателей.")
             cursor.execute("UPDATE users SET role=%s WHERE user_id=%s AND peer_id=%s", (lvl, target, pid))
             conn.commit()
-            await message.answer(f"✅ Установлен ранг {lvl} для [id{target}|него].")
-        except: await message.answer("❌ Ошибка!")
+            await message.answer(f"✅ Ранг {lvl} установлен для [id{target}|него].")
+        except: pass
         return
 
 if __name__ == "__main__":
