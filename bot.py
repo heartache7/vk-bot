@@ -1841,42 +1841,48 @@ async def handler(msg: Message):
 # =========================
 # AUTO KICK BANNED USERS
 # =========================
-@bot.on.chat_invite_user()
-async def on_chat_invite(event):
-    """Автоматически кикает забаненных пользователей при добавлении"""
+# =========================
+# RAW EVENT HANDLER FOR NEW MEMBERS
+# =========================
+@bot.on.raw_event()
+async def raw_event_handler(event):
+    """Обработчик всех событий, включая добавление новых участников"""
     try:
-        if hasattr(event, 'event'):
-            user_id = event.event.member_id
-            peer_id = event.event.peer_id
-        elif hasattr(event, 'object'):
-            user_id = event.object.member_id
-            chat_id = event.object.peer_id
+        # Проверяем тип события
+        event_type = event.get('type', '')
+        
+        if event_type == 'chat_invite_user' or event_type == 'chat_invite_user_by_link':
+            event_data = event.get('object', {})
+            user_id = event_data.get('member_id') or event_data.get('user_id')
+            chat_id = event_data.get('peer_id') or event_data.get('chat_id')
+            
+            if not user_id or not chat_id:
+                return
+            
             peer_id = chat_id if chat_id > 2000000000 else chat_id + 2000000000
-        else:
-            return
-        
-        logger.info(f"New member joined: user_id={user_id}, peer_id={peer_id}")
-        
-        if is_user_banned(peer_id, user_id):
-            logger.info(f"Banned user {user_id} tried to join, kicking...")
-            await kick_user(peer_id, user_id)
             
-            user_name = await get_user_name(user_id)
+            logger.info(f"New member joined: user_id={user_id}, peer_id={peer_id}")
             
-            try:
-                await bot.api.messages.send(
-                    peer_id=peer_id,
-                    message=f"🚫 ПОПЫТКА ВХОДА ЗАБАНЕННОГО\n\n"
-                           f"👤 {user_name} (id{user_id})\n"
-                           f"❌ Пользователь забанен и был исключён\n\n"
-                           f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-                    random_id=0
-                )
-            except Exception as e:
-                logger.error(f"Failed to send notification: {e}")
+            if is_user_banned(peer_id, user_id):
+                logger.info(f"Banned user {user_id} tried to join, kicking...")
+                await kick_user(peer_id, user_id)
+                
+                user_name = await get_user_name(user_id)
+                
+                try:
+                    await bot.api.messages.send(
+                        peer_id=peer_id,
+                        message=f"🚫 ПОПЫТКА ВХОДА ЗАБАНЕННОГО\n\n"
+                               f"👤 {user_name} (id{user_id})\n"
+                               f"❌ Пользователь забанен и был исключён\n\n"
+                               f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                        random_id=0
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send notification: {e}")
     
     except Exception as e:
-        logger.error(f"ERROR in on_chat_invite: {e}")
+        logger.error(f"ERROR in raw_event_handler: {e}")
         traceback.print_exc()
 
 # =========================
@@ -1888,10 +1894,32 @@ async def check_expired_punishments():
         try:
             conn, cur = db()
             try:
+                # Удаляем истёкшие наказания
                 cur.execute("""
                 DELETE FROM punishments
                 WHERE end_at IS NOT NULL AND end_at < NOW()
                 """)
+                
+                # Проверяем баны, которые нужно снять
+                cur.execute("""
+                SELECT user_id, peer_id FROM punishments
+                WHERE type='ban' AND end_at IS NOT NULL AND end_at < NOW()
+                """)
+                
+                expired_bans = cur.fetchall()
+                for user_id, peer_id in expired_bans:
+                    logger.info(f"Ban expired for user {user_id} in chat {peer_id}")
+                    try:
+                        await bot.api.messages.send(
+                            peer_id=peer_id,
+                            message=f"✅ БАН ИСТЁК\n\n"
+                                   f"👤 @id{user_id} может присоединиться к беседе\n\n"
+                                   f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                            random_id=0
+                        )
+                    except:
+                        pass
+                
             finally:
                 conn.close()
         except Exception as e:
