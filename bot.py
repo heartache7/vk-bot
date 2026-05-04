@@ -2,9 +2,11 @@ import os
 import re
 import traceback
 import logging
+import asyncio
 import psycopg2
 from datetime import datetime, timedelta
 from vkbottle.bot import Bot, Message
+from vkbottle import API
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +20,7 @@ if not VK_TOKEN or not DATABASE_URL:
     raise ValueError("VK_TOKEN and DATABASE_URL must be set in environment variables")
 
 bot = Bot(token=VK_TOKEN)
+api = API(token=VK_TOKEN)
 
 # =========================
 # DB
@@ -76,7 +79,6 @@ def init():
             );
             """)
 
-            # Создаём таблицу если её нет
             cur.execute("""
             CREATE TABLE IF NOT EXISTS cmd_permissions(
                 id SERIAL PRIMARY KEY,
@@ -87,7 +89,6 @@ def init():
             );
             """)
             
-            # Проверяем, существует ли колонка required_role
             cur.execute("""
             SELECT column_name 
             FROM information_schema.columns 
@@ -95,14 +96,12 @@ def init():
             """)
             
             if not cur.fetchone():
-                # Добавляем колонку, если её нет
                 cur.execute("""
                 ALTER TABLE cmd_permissions 
                 ADD COLUMN required_role INT DEFAULT 10
                 """)
                 logger.info(">>> Added required_role column to cmd_permissions")
 
-            # Вставляем стандартные права для команд
             default_permissions = [
                 ('warn', 10), ('mute', 10), ('unmute', 10),
                 ('ban', 50), ('unban', 50), ('kick', 10),
@@ -166,17 +165,14 @@ def extract(msg: Message):
     if not msg.text:
         return None
     
-    # Пытаемся найти упоминание в формате [id123456789|@user]
     r = re.search(r"\[id(\d+)\|", msg.text)
     if r:
         return int(r.group(1))
     
-    # Пытаемся найти просто id123456789
     r = re.search(r"id(\d+)", msg.text)
     if r:
         return int(r.group(1))
     
-    # Пытаемся найти @username
     r = re.search(r"@([a-zA-Z0-9_.]+)", msg.text)
     if r:
         return r.group(1)
@@ -385,7 +381,6 @@ async def start(msg: Message):
                 DO UPDATE SET role=100
                 """, (m.member_id, msg.peer_id))
 
-                # Копируем глобальные настройки прав в беседу
                 cur.execute("""
                 INSERT INTO cmd_permissions (peer_id, cmd_name, required_role)
                 SELECT %s, cmd_name, required_role
@@ -422,7 +417,6 @@ async def setcmd_help(msg: Message):
     try:
         peer_id = msg.peer_id
         
-        # Получаем текущие настройки команд для беседы
         cur.execute("""
         SELECT DISTINCT ON (cmd_name) cmd_name, required_role
         FROM cmd_permissions
@@ -462,7 +456,6 @@ async def setcmd_help(msg: Message):
 async def setcmd(msg: Message, cmd_name: str, priority: str):
     conn, cur = db()
     try:
-        # Проверяем, является ли пользователь создателем беседы
         try:
             res = await bot.api.messages.get_conversation_members(peer_id=msg.peer_id)
             is_owner = False
@@ -888,7 +881,6 @@ async def staff(msg: Message):
             user_name = await get_user_name(user_id)
             role_name = roles_dict.get(role_priority, f"Уровень {role_priority}")
             
-            # Проверяем наказания
             if is_user_banned(peer_id, user_id):
                 status = "🚫 ЗАБАНЕН"
             elif is_user_muted(peer_id, user_id):
@@ -899,19 +891,16 @@ async def staff(msg: Message):
             text += f"👤 {user_name} ({status})\n"
             text += f"   📊 {role_name} (приоритет: {role_priority})\n"
             
-            # Проверяем ник
             cur.execute("SELECT nickname FROM users WHERE user_id=%s AND peer_id=%s", (user_id, peer_id))
             nick_res = cur.fetchone()
             if nick_res and nick_res[0]:
                 text += f"   🏷 Ник: {nick_res[0]}\n"
             
-            # Проверяем предупреждения
             cur.execute("SELECT warn_count FROM users WHERE user_id=%s AND peer_id=%s", (user_id, peer_id))
             warn_res = cur.fetchone()
             if warn_res and warn_res[0] > 0:
                 text += f"   ⚠️ Предупреждений: {warn_res[0]}/3\n"
             
-            # Проверяем, является ли пользователь создателем беседы
             try:
                 res = await bot.api.messages.get_conversation_members(peer_id=peer_id)
                 for m in res.items:
@@ -1426,7 +1415,6 @@ async def process_ban(msg: Message, uid: int, time_or_reason: str, reason: str, 
         VALUES (%s, %s, 'ban', %s, %s)
         """, (uid, pid, end_time, final_reason))
 
-        # Кикаем пользователя
         kicked = await kick_user(pid, uid)
         
         kick_status = "✅ Исключён из беседы" if kicked else "⚠️ Не удалось исключить"
@@ -1779,7 +1767,6 @@ async def process_stats(msg: Message, uid: int):
         role_res = cur.fetchone()
         role_name = role_res[0] if role_res else f"Уровень {role}"
         
-        # Проверяем наказания
         if is_user_banned(pid, uid):
             status = "🚫 ЗАБАНЕН"
         elif is_user_muted(pid, uid):
@@ -1830,7 +1817,6 @@ async def handler(msg: Message):
 
         # Проверяем, замучен ли пользователь
         if is_user_muted(pid, uid):
-            # Удаляем сообщение замученного пользователя
             if hasattr(msg, 'conversation_message_id'):
                 await delete_message(pid, msg.conversation_message_id)
             return
@@ -1853,34 +1839,65 @@ async def handler(msg: Message):
         conn.close()
 
 # =========================
-# USER JOIN HANDLER - AUTO KICK BANNED
+# AUTO KICK BANNED USERS
 # =========================
 @bot.on.chat_invite_user()
-async def on_user_join(event):
+async def on_chat_invite(event):
     """Автоматически кикает забаненных пользователей при добавлении"""
     try:
-        # Получаем ID пользователя и беседы
         if hasattr(event, 'event'):
             user_id = event.event.member_id
-            chat_id = event.event.peer_id
+            peer_id = event.event.peer_id
         elif hasattr(event, 'object'):
             user_id = event.object.member_id
             chat_id = event.object.peer_id
+            peer_id = chat_id if chat_id > 2000000000 else chat_id + 2000000000
         else:
-            user_id = event.member_id
-            chat_id = event.peer_id
+            return
         
-        peer_id = chat_id if chat_id > 2000000000 else chat_id + 2000000000
-        
-        logger.info(f"User {user_id} joined chat {peer_id}")
+        logger.info(f"New member joined: user_id={user_id}, peer_id={peer_id}")
         
         if is_user_banned(peer_id, user_id):
-            logger.info(f"User {user_id} is banned, kicking...")
+            logger.info(f"Banned user {user_id} tried to join, kicking...")
             await kick_user(peer_id, user_id)
+            
+            user_name = await get_user_name(user_id)
+            
+            try:
+                await bot.api.messages.send(
+                    peer_id=peer_id,
+                    message=f"🚫 ПОПЫТКА ВХОДА ЗАБАНЕННОГО\n\n"
+                           f"👤 {user_name} (id{user_id})\n"
+                           f"❌ Пользователь забанен и был исключён\n\n"
+                           f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                    random_id=0
+                )
+            except Exception as e:
+                logger.error(f"Failed to send notification: {e}")
     
     except Exception as e:
-        logger.error(f"ERROR in on_user_join: {e}")
+        logger.error(f"ERROR in on_chat_invite: {e}")
         traceback.print_exc()
+
+# =========================
+# PERIODIC CHECK FOR EXPIRED PUNISHMENTS
+# =========================
+async def check_expired_punishments():
+    """Периодически проверяет истёкшие наказания"""
+    while True:
+        try:
+            conn, cur = db()
+            try:
+                cur.execute("""
+                DELETE FROM punishments
+                WHERE end_at IS NOT NULL AND end_at < NOW()
+                """)
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"ERROR in check_expired_punishments: {e}")
+        
+        await asyncio.sleep(60)
 
 # =========================
 # STARTUP
@@ -1890,6 +1907,9 @@ if __name__ == "__main__":
     print(">>> FLEX BOT STARTED")
     print(f">>> Owner ID: {OWNER_ID}")
     print(">>> Waiting for messages...")
+    
+    loop = asyncio.get_event_loop()
+    loop.create_task(check_expired_punishments())
     
     try:
         bot.run_forever()
