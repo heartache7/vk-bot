@@ -114,35 +114,36 @@ async def get_user_name(uid):
     except:
         return f"Пользователь {uid}"
 
+def get_user_role(cur, peer_id, user_id):
+    """Получает роль пользователя в беседе"""
+    if user_id == OWNER_ID:
+        return 1000
+    cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (user_id, peer_id))
+    res = cur.fetchone()
+    return res[0] if res else 0
+
+def get_ban_info(cur, peer_id, user_id):
+    """Получает информацию о бане пользователя"""
+    cur.execute("""
+    SELECT reason, end_at FROM punishments
+    WHERE user_id=%s AND peer_id=%s AND type='ban' 
+    AND (end_at IS NULL OR end_at > NOW())
+    """, (user_id, peer_id))
+    return cur.fetchone()
+
 def is_user_banned(peer_id, user_id):
     """Проверяет, забанен ли пользователь в этой беседе"""
     conn, cur = db()
     try:
-        cur.execute("""
-        SELECT end_at FROM punishments
-        WHERE user_id=%s AND peer_id=%s AND type='ban' 
-        AND (end_at IS NULL OR end_at > NOW())
-        """, (user_id, peer_id))
-        return cur.fetchone() is not None
+        return get_ban_info(cur, peer_id, user_id) is not None
     finally:
         conn.close()
 
 def can_punish_user(cur, peer_id, punisher_id, target_id):
     """Проверяет, может ли punisher наказать target'а"""
-    # Владелец бота может наказывать всех
-    if punisher_id == OWNER_ID:
-        return True
-    
-    cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (punisher_id, peer_id))
-    punisher_role = cur.fetchone()
-    punisher_role_val = punisher_role[0] if punisher_role else 0
-    
-    cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (target_id, peer_id))
-    target_role = cur.fetchone()
-    target_role_val = target_role[0] if target_role else 0
-    
-    # Можно наказывать только тех, кто ниже по приоритету
-    return punisher_role_val > target_role_val
+    punisher_role = get_user_role(cur, peer_id, punisher_id)
+    target_role = get_user_role(cur, peer_id, target_id)
+    return punisher_role > target_role
 
 def get_default_cmd_role(cmd_name):
     """Возвращает роль по умолчанию для команды"""
@@ -160,6 +161,15 @@ def get_default_cmd_role(cmd_name):
     }
     return defaults.get(cmd_name, 0)
 
+def get_role_name(cur, peer_id, priority):
+    """Получает имя роли по приоритету"""
+    cur.execute("""
+    SELECT role_name FROM roles
+    WHERE peer_id=%s AND role_priority=%s
+    """, (peer_id, priority))
+    res = cur.fetchone()
+    return res[0] if res else f"Уровень {priority}"
+
 # =========================
 # START
 # =========================
@@ -173,19 +183,12 @@ async def start(msg: Message):
             return await msg.answer(
                 "👋 ПРИВЕТ, Я FLEX BOT!\n\n"
                 "🎉 Спасибо за приглашение в вашу беседу!\n\n"
-                "🔧 Я бот для модерации чатов с множеством полезных функций:\n\n"
-                "🏷 НИКИ - устанавливайте красивые ники\n"
-                "⚠️ МОДЕРАЦИЯ - система предупреждений и наказаний\n"
-                "🔇 МУТ - запрет на написание сообщений\n"
-                "🚫 БАН - блокировка пользователей\n"
-                "👢 КИК - исключение из беседы\n"
-                "🎖️ РОЛИ - система ролей и приоритетов\n\n"
                 "⚠️ ОШИБКА ПРАВ ДОСТУПА\n\n"
                 "🔧 Что нужно сделать:\n"
                 "1️⃣ Откройте настройки беседы\n"
-                "2️⃣ Перейдите в раздел 'Управление ботами'\n"
-                "3️⃣ Выдайте боту 'FLEX BOT' права администратора\n"
-                "4️⃣ Убедитесь, что включены права на удаление\n\n"
+                "2️⃣ Перейдите в 'Управление ботами'\n"
+                "3️⃣ Выдайте FLEX BOT права администратора\n"
+                "4️⃣ Убедитесь, что включено удаление сообщений\n\n"
                 "После этого напишите /start ещё раз ⭐"
             )
 
@@ -201,10 +204,10 @@ async def start(msg: Message):
                 owner_name = await get_user_name(m.member_id)
 
                 return await msg.answer(
-                    "✅ БОТ УСПЕШНО ИНИЦИАЛИЗИРОВАН\n\n"
+                    "✅ БОТ ИНИЦИАЛИЗИРОВАН\n\n"
                     "👑 FLEX BOT активирован!\n\n"
-                    f"🎖️ @id{m.member_id} ({owner_name}) получил роль 100\n\n"
-                    "📖 Введите /help чтобы увидеть все команды"
+                    f"🎖️ @id{m.member_id} ({owner_name}) - роль 100\n\n"
+                    "📖 /help для списка команд"
                 )
 
     except Exception as e:
@@ -218,28 +221,53 @@ async def start(msg: Message):
 # =========================
 @bot.on.message(text="/help")
 async def help_cmd(msg: Message):
-    return await msg.answer(
-        "💠 FLEX BOT - КОМАНДЫ\n\n"
-        "🏷 НИКИ:\n"
-        "/snick [ник] - Установить ник\n"
-        "/rnick - Удалить ник\n\n"
-        "⚠️ МОДЕРАЦИЯ:\n"
-        "/warn [id] [причина] - Предупреждение\n"
-        "/mute [id] [время] [причина] - Мут\n"
-        "/unmute [id] - Снять мут\n"
-        "/ban [id] [время] [причина] - Бан\n"
-        "/unban [id] - Разбанить\n"
-        "/kick [id] - Исключить\n\n"
-        "🎖️ РОЛИ:\n"
-        "/giverole [@user] [приоритет] - Выдать роль (роль 60+)\n"
-        "/roles - Список ролей беседы\n"
-        "/staff - Список модераторов\n\n"
-        "📊 СТАТИСТИКА:\n"
-        "/stats [@user] - Статистика пользователя\n\n"
-        "⚙️ ТОЛЬКО ВЛАДЕЛЕЦ БОТА:\n"
-        "/sysrole @user [приоритет] - Выдать роль в беседе\n"
-        "/addrole [приоритет] [имя] - Добавить роль в беседу\n"
-    )
+    conn, cur = db()
+    try:
+        user_role = get_user_role(cur, msg.peer_id, msg.from_id)
+        is_owner = msg.from_id == OWNER_ID
+        
+        text = "💠 FLEX BOT - КОМАНДЫ\n\n"
+        
+        # ВСЕГДА ДОСТУПНО
+        text += "🏷 НИКИ (всегда):\n"
+        text += "/snick [ник] - Установить ник\n"
+        text += "/rnick [@user] - Удалить ник\n\n"
+        
+        text += "📊 СТАТИСТИКА (всегда):\n"
+        text += "/stats [@user] - Статистика\n"
+        text += "/roles - Список ролей\n"
+        text += "/staff - Список модераторов\n\n"
+        
+        # МОДЕРАЦИЯ (роль 10+)
+        if user_role >= 10 or is_owner:
+            text += "⚠️ МОДЕРАЦИЯ (роль 10+):\n"
+            text += "/warn [id] [причина] - Предупреждение\n"
+            text += "/kick [id] - Исключить\n"
+            text += "/mute [id] [время] [причина] - Мут\n"
+            text += "/unmute [id] - Снять мут\n\n"
+        
+        # БАН (роль 50+)
+        if user_role >= 50 or is_owner:
+            text += "🚫 БАН (роль 50+):\n"
+            text += "/ban [id] [время] [причина] - Бан\n"
+            text += "/unban [id] - Разбан\n\n"
+        
+        # РОЛИ (роль 60+)
+        if user_role >= 60 or is_owner:
+            text += "🎖️ ВЫДАЧА РОЛЕЙ (роль 60+):\n"
+            text += "/giverole [@user] [приоритет] - Выдать роль\n\n"
+        
+        # ВЛАДЕЛЕЦ
+        if is_owner:
+            text += "⚙️ ТОЛЬКО ВЛАДЕЛЕЦ:\n"
+            text += "/sysrole @user [приоритет] - Выдать роль\n"
+            text += "/addrole [приоритет] [имя] - Добавить роль\n"
+        
+        text += f"\n📊 Ваш приоритет: {user_role}"
+        
+        return await msg.answer(text)
+    finally:
+        conn.close()
 
 # =========================
 # SYSTEM COMMANDS (OWNER ONLY)
@@ -247,17 +275,13 @@ async def help_cmd(msg: Message):
 @bot.on.message(text="/sysrole")
 async def sysrole_help(msg: Message):
     if msg.from_id != OWNER_ID:
-        return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН\n\nЭта команда только для владельца бота")
+        return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН")
     
     return await msg.answer(
-        "⚙️ СИСТЕМНАЯ КОМАНДА: /sysrole\n\n"
-        "🔒 ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА БОТА\n\n"
-        "📝 Синтаксис:\n"
-        "/sysrole @пользователь [приоритет]\n\n"
-        "⚙️ Примеры:\n"
+        "⚙️ /sysrole @user [приоритет]\n\n"
+        "Примеры:\n"
         "• /sysrole @Ivan 50\n"
-        "• /sysrole @Maria 100\n"
-        "• (ответить на сообщение) /sysrole 60"
+        "• (ответить) /sysrole 60"
     )
 
 @bot.on.message(text="/sysrole <user_info> <priority>")
@@ -270,46 +294,36 @@ async def sysrole_set(msg: Message, user_info: str, priority: str):
         try:
             priority_int = int(priority)
         except:
-            return await msg.answer("❌ ОШИБКА: приоритет должен быть числом\n\nПример: /sysrole @Ivan 50")
+            return await msg.answer("❌ Приоритет должен быть числом")
         
         uid = extract(msg)
         if not uid:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
-                return await msg.answer("❌ ОШИБКА: неверный формат пользователя")
+                return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
-        if priority_int < 0 or priority_int > 1000:
-            return await msg.answer("❌ ОШИБКА: приоритет должен быть от 0 до 1000")
-        
-        peer_id = msg.peer_id
-        user_name = await get_user_name(uid)
+        if not (0 <= priority_int <= 1000):
+            return await msg.answer("❌ Приоритет от 0 до 1000")
         
         cur.execute("""
         INSERT INTO users (user_id, peer_id, role)
         VALUES (%s, %s, %s)
         ON CONFLICT (user_id, peer_id)
         DO UPDATE SET role=%s
-        """, (uid, peer_id, priority_int, priority_int))
+        """, (uid, msg.peer_id, priority_int, priority_int))
         
-        cur.execute("""
-        SELECT role_name FROM roles
-        WHERE peer_id=%s AND role_priority=%s
-        """, (peer_id, priority_int))
-        
-        role_res = cur.fetchone()
-        role_name = role_res[0] if role_res else f"Уровень {priority_int}"
+        user_name = await get_user_name(uid)
+        role_name = get_role_name(cur, msg.peer_id, priority_int)
         
         await msg.answer(
-            f"🎖️ РОЛЬ ВЫДАНА\n\n"
-            f"👤 {user_name} (id{uid})\n"
-            f"📋 Роль: {role_name}\n"
-            f"📊 Приоритет: {priority_int}\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            f"✅ РОЛЬ ВЫДАНА\n\n"
+            f"👤 {user_name}\n"
+            f"📋 {role_name} ({priority_int})"
         )
     
     except Exception as e:
-        print(f"ERROR in sysrole_set: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -317,17 +331,13 @@ async def sysrole_set(msg: Message, user_info: str, priority: str):
 @bot.on.message(text="/addrole")
 async def addrole_help(msg: Message):
     if msg.from_id != OWNER_ID:
-        return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН\n\nЭта команда только для владельца бота")
+        return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН")
     
     return await msg.answer(
-        "📋 КОМАНДА: ДОБАВЛЕНИЕ РОЛИ\n\n"
-        "🔒 ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА БОТА\n\n"
-        "📝 Синтаксис:\n"
-        "/addrole [приоритет] [имя роли]\n\n"
-        "⚙️ Примеры:\n"
+        "📋 /addrole [приоритет] [имя]\n\n"
+        "Примеры:\n"
         "• /addrole 50 Модератор\n"
-        "• /addrole 10 VIP\n"
-        "• /addrole 100 Создатель"
+        "• /addrole 10 VIP"
     )
 
 @bot.on.message(text="/addrole <priority> <role_name>")
@@ -340,32 +350,25 @@ async def addrole(msg: Message, priority: str, role_name: str):
         try:
             priority = int(priority)
         except:
-            return await msg.answer("❌ ОШИБКА: приоритет должен быть числом\n\nПример: /addrole 50 Модератор")
+            return await msg.answer("❌ Приоритет должен быть числом")
         
-        if priority < 1 or priority > 1000:
-            return await msg.answer("❌ ОШИБКА: приоритет должен быть от 1 до 1000")
+        if not (1 <= priority <= 1000):
+            return await msg.answer("❌ Приоритет от 1 до 1000")
         
         if len(role_name) > 30:
-            return await msg.answer("❌ ОШИБКА: имя роли слишком длинное (макс. 30 символов)")
-        
-        peer_id = msg.peer_id
+            return await msg.answer("❌ Имя слишком длинное (макс. 30)")
         
         cur.execute("""
         INSERT INTO roles (peer_id, role_priority, role_name)
         VALUES (%s, %s, %s)
-        """, (peer_id, priority, role_name))
+        """, (msg.peer_id, priority, role_name))
         
-        return await msg.answer(
-            f"✅ РОЛЬ ДОБАВЛЕНА\n\n"
-            f"📋 Имя: {role_name}\n"
-            f"📊 Приоритет: {priority}\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
+        await msg.answer(f"✅ РОЛЬ ДОБАВЛЕНА\n📋 {role_name} ({priority})")
     
     except Exception as e:
         if "unique" in str(e).lower():
-            return await msg.answer(f"❌ ОШИБКА: приоритет {priority} уже используется в этой беседе")
-        print(f"ERROR in addrole: {e}")
+            return await msg.answer(f"❌ Приоритет {priority} уже используется")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -376,53 +379,45 @@ async def addrole(msg: Message, priority: str, role_name: str):
 @bot.on.message(text="/giverole")
 async def giverole_help(msg: Message):
     return await msg.answer(
-        "🎖️ КОМАНДА: ВЫДАЧА РОЛИ\n\n"
-        "📝 Синтаксис:\n"
-        "/giverole @пользователь [приоритет]\n"
-        "или ответьте на сообщение: /giverole [приоритет]\n\n"
-        "📊 ТРЕБУЕМЫЙ ПРИОРИТЕТ: минимум 60\n\n"
-        "⚙️ Примеры:\n"
+        "🎖️ /giverole [@user] [приоритет]\n\n"
+        "Требуемый приоритет: 60+\n\n"
+        "Примеры:\n"
         "• /giverole @Ivan 10\n"
-        "• /giverole @Maria 50\n"
-        "• (ответить на сообщение) /giverole 100"
+        "• (ответить) /giverole 50"
     )
 
 @bot.on.message(text="/giverole <user_info> <priority>")
 async def giverole(msg: Message, user_info: str, priority: str):
     conn, cur = db()
     try:
-        cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (msg.from_id, msg.peer_id))
-        sender_role = cur.fetchone()
-        sender_role_val = sender_role[0] if sender_role else 0
-        
+        sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('giverole')
-        if sender_role_val < default_role and msg.from_id != OWNER_ID:
-            return await msg.answer(
-                f"❌ ДОСТУП ЗАПРЕЩЁН\n\n"
-                f"Требуемый приоритет роли: {default_role}\n"
-                f"Ваш приоритет: {sender_role_val}"
-            )
+        
+        if sender_role < default_role and msg.from_id != OWNER_ID:
+            return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
         if not uid:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
-                return await msg.answer("❌ ОШИБКА: НЕВЕРНЫЙ ФОРМАТ\n\nИспользуйте: /giverole @username приоритет")
+                return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         try:
             priority_int = int(priority)
         except:
-            return await msg.answer("❌ ОШИБКА: приоритет должен быть числом\n\nПример: /giverole @Ivan 50")
+            return await msg.answer("❌ Приоритет должен быть числом")
         
-        if priority_int < 0 or priority_int > 1000:
-            return await msg.answer("❌ ОШИБКА: приоритет должен быть от 0 до 1000")
+        if not (0 <= priority_int <= 1000):
+            return await msg.answer("❌ Приоритет от 0 до 1000")
         
-        # Проверяем, может ли выдающий выдать эту роль
         if not can_punish_user(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
-            return await msg.answer("❌ НЕЛЬЗЯ ВЫДАТЬ РОЛЬ\n\nМожно выдавать роли только пользователям ниже по приоритету")
-        
-        user_name = await get_user_name(uid)
+            target_role = get_user_role(cur, msg.peer_id, uid)
+            return await msg.answer(
+                f"❌ НЕ МОЖЕШЬ ВЫДАТЬ\n\n"
+                f"Его приоритет: {target_role}\n"
+                f"Твой: {sender_role}"
+            )
         
         cur.execute("""
         INSERT INTO users (user_id, peer_id, role)
@@ -431,25 +426,17 @@ async def giverole(msg: Message, user_info: str, priority: str):
         DO UPDATE SET role=%s
         """, (uid, msg.peer_id, priority_int, priority_int))
         
-        cur.execute("""
-        SELECT role_name FROM roles
-        WHERE peer_id=%s AND role_priority=%s
-        """, (msg.peer_id, priority_int))
-        
-        role_res = cur.fetchone()
-        role_name = role_res[0] if role_res else f"Уровень {priority_int}"
+        user_name = await get_user_name(uid)
+        role_name = get_role_name(cur, msg.peer_id, priority_int)
         
         await msg.answer(
-            f"🎖️ РОЛЬ ВЫДАНА\n\n"
-            f"👤 {user_name} (id{uid})\n"
-            f"📋 Роль: {role_name}\n"
-            f"📊 Приоритет: {priority_int}\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-            f"👮 Выдал: @id{msg.from_id}"
+            f"✅ РОЛЬ ВЫДАНА\n\n"
+            f"👤 {user_name}\n"
+            f"📋 {role_name} ({priority_int})"
         )
     
     except Exception as e:
-        print(f"ERROR in giverole: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -458,31 +445,24 @@ async def giverole(msg: Message, user_info: str, priority: str):
 async def list_roles(msg: Message):
     conn, cur = db()
     try:
-        peer_id = msg.peer_id
         cur.execute("""
         SELECT role_priority, role_name FROM roles
-        WHERE peer_id=%s
-        ORDER BY role_priority DESC
-        """, (peer_id,))
+        WHERE peer_id=%s ORDER BY role_priority DESC
+        """, (msg.peer_id,))
         
         roles = cur.fetchall()
         
         if not roles:
             return await msg.answer(
                 "📊 СПИСОК РОЛЕЙ\n\n"
-                "❌ В этой беседе ещё нет добавленных ролей\n\n"
-                "🆕 Владелец может добавить роль: /addrole 50 Модератор"
+                "❌ Нет добавленных ролей"
             )
         
-        roles_text = "📊 СПИСОК РОЛЕЙ В БЕСЕДЕ\n\n"
+        text = "📊 РОЛИ В БЕСЕДЕ\n\n"
         for priority, name in roles:
-            roles_text += f"  {priority:3d} - {name}\n"
+            text += f"{priority:3d} - {name}\n"
         
-        return await msg.answer(roles_text)
-    
-    except Exception as e:
-        print(f"ERROR in list_roles: {e}")
-        traceback.print_exc()
+        return await msg.answer(text)
     finally:
         conn.close()
 
@@ -490,42 +470,30 @@ async def list_roles(msg: Message):
 async def staff(msg: Message):
     conn, cur = db()
     try:
-        peer_id = msg.peer_id
-        
         cur.execute("""
         SELECT user_id, role FROM users
         WHERE peer_id=%s AND role > 0
         ORDER BY role DESC
-        """, (peer_id,))
+        """, (msg.peer_id,))
         
         staff_list = cur.fetchall()
         
         if not staff_list:
             return await msg.answer(
-                "👥 СПИСОК МОДЕРАЦИИ\n\n"
-                "❌ В этой беседе нет модераторов\n\n"
-                "Используйте /giverole чтобы выдать роль"
+                "👥 МОДЕРАЦИЯ\n\n"
+                "❌ Нет модераторов"
             )
         
-        text = "👥 СПИСОК МОДЕРАЦИИ БЕСЕДЫ\n\n"
+        text = "👥 МОДЕРАЦИЯ\n\n"
         for user_id, role_priority in staff_list:
             user_name = await get_user_name(user_id)
-            
-            cur.execute("""
-            SELECT role_name FROM roles
-            WHERE peer_id=%s AND role_priority=%s
-            """, (peer_id, role_priority))
-            
-            role_res = cur.fetchone()
-            role_name = role_res[0] if role_res else f"Уровень {role_priority}"
-            
-            text += f"👤 {user_name}\n"
-            text += f"   📊 {role_name} ({role_priority})\n\n"
+            role_name = get_role_name(cur, msg.peer_id, role_priority)
+            text += f"👤 {user_name} - {role_name} ({role_priority})\n"
         
         return await msg.answer(text)
     
     except Exception as e:
-        print(f"ERROR in staff: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -536,47 +504,32 @@ async def staff(msg: Message):
 @bot.on.message(text="/warn")
 async def warn_help(msg: Message):
     return await msg.answer(
-        "⚠️ КОМАНДА: ПРЕДУПРЕЖДЕНИЕ\n\n"
-        "📝 Синтаксис:\n"
-        "/warn @пользователь [причина]\n"
-        "или ответьте на сообщение: /warn [причина]\n\n"
-        "📋 Описание:\n"
-        "После 3 предупреждений - автоматический бан\n\n"
-        "⚙️ Примеры:\n"
+        "⚠️ /warn [@user] [причина]\n\n"
+        "После 3 - автобан\n\n"
+        "Примеры:\n"
         "• /warn @Ivan спам\n"
-        "• (ответить на сообщение) /warn флуд"
+        "• (ответить) /warn флуд"
     )
 
 @bot.on.message(text="/warn <user_info> <reason>")
-async def warn(msg: Message, user_info: str, reason: str = "Без указанной причины"):
+async def warn(msg: Message, user_info: str, reason: str = "Без причины"):
     conn, cur = db()
     try:
-        cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (msg.from_id, msg.peer_id))
-        sender_role = cur.fetchone()
-        sender_role_val = sender_role[0] if sender_role else 0
-        
+        sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('warn')
-        if sender_role_val < default_role and msg.from_id != OWNER_ID:
-            return await msg.answer(f"❌ ДОСТУП ЗАПРЕЩЁН\n\nТребуемый приоритет: {default_role}+")
+        
+        if sender_role < default_role and msg.from_id != OWNER_ID:
+            return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
         if not uid:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
-                return await msg.answer("❌ ОШИБКА: НЕВЕРНЫЙ ФОРМАТ")
+                return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         if not can_punish_user(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
-            target_name = await get_user_name(uid)
-            cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
-            target_role_res = cur.fetchone()
-            target_role = target_role_res[0] if target_role_res else 0
-            return await msg.answer(
-                f"❌ НЕЛЬЗЯ НАКАЗАТЬ\n\n"
-                f"👤 {target_name}\n"
-                f"📊 Его приоритет: {target_role}\n"
-                f"📊 Ваш приоритет: {sender_role_val}"
-            )
+            return await msg.answer("❌ НЕ МОЖЕШЬ НАКАЗАТЬ")
         
         pid = msg.peer_id
         user_name = await get_user_name(uid)
@@ -600,7 +553,7 @@ async def warn(msg: Message, user_info: str, reason: str = "Без указан�
             cur.execute("""
             INSERT INTO punishments (user_id, peer_id, type, reason)
             VALUES (%s, %s, 'ban', %s)
-            """, (uid, pid, "Автоматический бан (3 предупреждения)"))
+            """, (uid, pid, "Автобан (3 предупреждения)"))
             
             try:
                 await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=uid)
@@ -608,22 +561,20 @@ async def warn(msg: Message, user_info: str, reason: str = "Без указан�
                 pass
             
             return await msg.answer(
-                f"🚫 АВТОМАТИЧЕСКИЙ БАН\n\n"
-                f"👤 {user_name} (id{uid})\n"
-                f"📋 Причина: 3 предупреждения\n\n"
-                f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                f"🚫 АВТОБАН\n\n"
+                f"👤 {user_name}\n"
+                f"📋 3 предупреждения"
             )
 
         await msg.answer(
-            f"⚠️ ПРЕДУПРЕЖДЕНИЕ ВЫДАНО\n\n"
-            f"👤 {user_name} (id{uid})\n"
-            f"📊 Статус: {warns}/3\n"
-            f"📝 Причина: «{reason}»\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            f"⚠️ ПРЕДУПРЕЖДЕНИЕ\n\n"
+            f"👤 {user_name}\n"
+            f"📊 {warns}/3\n"
+            f"📝 {reason}"
         )
 
     except Exception as e:
-        print(f"ERROR in warn: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -634,53 +585,37 @@ async def warn(msg: Message, user_info: str, reason: str = "Без указан�
 @bot.on.message(text="/mute")
 async def mute_help(msg: Message):
     return await msg.answer(
-        "🔇 КОМАНДА: МУТ\n\n"
-        "📝 Синтаксис:\n"
-        "/mute @пользователь [время] [причина]\n\n"
-        "⏱️ Форматы времени:\n"
-        "• 10m - 10 минут\n"
-        "• 1h - 1 час\n"
-        "• 1d - 1 день\n\n"
-        "⚙️ Примеры:\n"
+        "🔇 /mute [@user] [время] [причина]\n\n"
+        "Форматы: 10m, 1h, 1d\n\n"
+        "Примеры:\n"
         "• /mute @Ivan 30m спам\n"
-        "• /mute @Maria флуд"
+        "• (ответить) /mute 1h"
     )
 
 @bot.on.message(text="/mute <user_info> <time_or_reason>")
 async def mute(msg: Message, user_info: str, time_or_reason: str):
     conn, cur = db()
     try:
-        cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (msg.from_id, msg.peer_id))
-        sender_role = cur.fetchone()
-        sender_role_val = sender_role[0] if sender_role else 0
-        
+        sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('mute')
-        if sender_role_val < default_role and msg.from_id != OWNER_ID:
-            return await msg.answer(f"❌ ДОСТУП ЗАПРЕЩЁН\n\nТребуемый приоритет: {default_role}+")
+        
+        if sender_role < default_role and msg.from_id != OWNER_ID:
+            return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
         if not uid:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
-                return await msg.answer("❌ ОШИБКА: НЕВЕРНЫЙ ФОРМАТ")
+                return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         if not can_punish_user(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
-            target_name = await get_user_name(uid)
-            cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
-            target_role_res = cur.fetchone()
-            target_role = target_role_res[0] if target_role_res else 0
-            return await msg.answer(
-                f"❌ НЕЛЬЗЯ НАКАЗАТЬ\n\n"
-                f"👤 {target_name}\n"
-                f"📊 Его приоритет: {target_role}\n"
-                f"📊 Ваш приоритет: {sender_role_val}"
-            )
+            return await msg.answer("❌ НЕ МОЖЕШЬ НАКАЗАТЬ")
         
         pid = msg.peer_id
         
         duration = None
-        reason = "Без указанной причины"
+        reason = "Без причины"
         
         if time_or_reason:
             parsed_time = parse_time(time_or_reason)
@@ -689,12 +624,8 @@ async def mute(msg: Message, user_info: str, time_or_reason: str):
             else:
                 reason = time_or_reason
         
-        if duration:
-            end_time = datetime.now() + duration
-            formatted_time = format_time(duration)
-        else:
-            end_time = None
-            formatted_time = "навсегда"
+        end_time = datetime.now() + duration if duration else None
+        formatted_time = format_time(duration) if duration else "навсегда"
 
         user_name = await get_user_name(uid)
 
@@ -703,19 +634,15 @@ async def mute(msg: Message, user_info: str, time_or_reason: str):
         VALUES (%s, %s, 'mute', %s, %s)
         """, (uid, pid, end_time, reason))
 
-        end_info = f"🔚 До: {end_time.strftime('%d.%m в %H:%M')}" if end_time else "⏰ Навсегда"
-
         await msg.answer(
-            f"🔇 МУТ НАЛОЖЕН\n\n"
-            f"👤 {user_name} (id{uid})\n"
+            f"🔇 МУТ\n\n"
+            f"👤 {user_name}\n"
             f"⏰ {formatted_time}\n"
-            f"{end_info}\n"
-            f"📝 Причина: «{reason}»\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            f"📝 {reason}"
         )
 
     except Exception as e:
-        print(f"ERROR in mute: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -726,30 +653,28 @@ async def mute(msg: Message, user_info: str, time_or_reason: str):
 @bot.on.message(text="/unmute")
 async def unmute_help(msg: Message):
     return await msg.answer(
-        "🔊 КОМАНДА: СНЯТЬ МУТ\n\n"
-        "📝 Синтаксис:\n"
-        "/unmute @пользователь\n"
-        "или ответьте на сообщение: /unmute"
+        "🔊 /unmute [@user]\n\n"
+        "Примеры:\n"
+        "• /unmute @Ivan\n"
+        "• (ответить) /unmute"
     )
 
 @bot.on.message(text="/unmute <user_info>")
 async def unmute(msg: Message, user_info: str):
     conn, cur = db()
     try:
-        cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (msg.from_id, msg.peer_id))
-        sender_role = cur.fetchone()
-        sender_role_val = sender_role[0] if sender_role else 0
-        
+        sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('unmute')
-        if sender_role_val < default_role and msg.from_id != OWNER_ID:
-            return await msg.answer(f"❌ ДОСТУП ЗАПРЕЩЁН\n\nТребуемый приоритет: {default_role}+")
+        
+        if sender_role < default_role and msg.from_id != OWNER_ID:
+            return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
         if not uid:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
-                return await msg.answer("❌ ОШИБКА: НЕВЕРНЫЙ ФОРМАТ")
+                return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         pid = msg.peer_id
         user_name = await get_user_name(uid)
@@ -759,15 +684,10 @@ async def unmute(msg: Message, user_info: str):
         WHERE user_id=%s AND peer_id=%s AND type='mute'
         """, (uid, pid))
         
-        await msg.answer(
-            f"🔊 МУТ СНЯТ\n\n"
-            f"👤 {user_name} (id{uid})\n\n"
-            f"✅ Может писать в чат\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
+        await msg.answer(f"✅ МУТ СНЯТ\n👤 {user_name}")
 
     except Exception as e:
-        print(f"ERROR in unmute: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -778,52 +698,37 @@ async def unmute(msg: Message, user_info: str):
 @bot.on.message(text="/ban")
 async def ban_help(msg: Message):
     return await msg.answer(
-        "🚫 КОМАНДА: БАН\n\n"
-        "📝 Синтаксис:\n"
-        "/ban @пользователь [время] [причина]\n\n"
-        "⏱️ Форматы времени:\n"
-        "• 1h - 1 час\n"
-        "• 1d - 1 день\n\n"
-        "⚙️ Примеры:\n"
+        "🚫 /ban [@user] [время] [причина]\n\n"
+        "Форматы: 1h, 1d\n\n"
+        "Примеры:\n"
         "• /ban @Ivan 1d спам\n"
-        "• /ban @John тролль"
+        "• (ответить) /ban тролль"
     )
 
 @bot.on.message(text="/ban <user_info> <time_or_reason>")
 async def ban(msg: Message, user_info: str, time_or_reason: str):
     conn, cur = db()
     try:
-        cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (msg.from_id, msg.peer_id))
-        sender_role = cur.fetchone()
-        sender_role_val = sender_role[0] if sender_role else 0
-        
+        sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('ban')
-        if sender_role_val < default_role and msg.from_id != OWNER_ID:
-            return await msg.answer(f"❌ ДОСТУП ЗАПРЕЩЁН\n\nТребуемый приоритет: {default_role}+")
+        
+        if sender_role < default_role and msg.from_id != OWNER_ID:
+            return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
         if not uid:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
-                return await msg.answer("❌ ОШИБКА: НЕВЕРНЫЙ ФОРМАТ")
+                return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         if not can_punish_user(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
-            target_name = await get_user_name(uid)
-            cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
-            target_role_res = cur.fetchone()
-            target_role = target_role_res[0] if target_role_res else 0
-            return await msg.answer(
-                f"❌ НЕЛЬЗЯ НАКАЗАТЬ\n\n"
-                f"👤 {target_name}\n"
-                f"📊 Его приоритет: {target_role}\n"
-                f"📊 Ваш приоритет: {sender_role_val}"
-            )
+            return await msg.answer("❌ НЕ МОЖЕШЬ НАКАЗАТЬ")
         
         pid = msg.peer_id
         
         duration = None
-        reason = "Без указанной причины"
+        reason = "Без причины"
         
         if time_or_reason:
             if time_or_reason.lower() == "permanent":
@@ -835,12 +740,8 @@ async def ban(msg: Message, user_info: str, time_or_reason: str):
                 else:
                     reason = time_or_reason
         
-        if duration:
-            end_time = datetime.now() + duration
-            formatted_time = format_time(duration)
-        else:
-            end_time = None
-            formatted_time = "навсегда"
+        end_time = datetime.now() + duration if duration else None
+        formatted_time = format_time(duration) if duration else "навсегда"
 
         user_name = await get_user_name(uid)
 
@@ -854,18 +755,15 @@ async def ban(msg: Message, user_info: str, time_or_reason: str):
         except:
             pass
 
-        duration_info = f"⏰ {formatted_time}" if formatted_time else "⏰ Вечный бан"
-
         await msg.answer(
-            f"🚫 БАН НАЛОЖЕН\n\n"
-            f"👤 {user_name} (id{uid})\n"
-            f"{duration_info}\n"
-            f"📝 Причина: «{reason}»\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            f"🚫 БАН\n\n"
+            f"👤 {user_name}\n"
+            f"⏰ {formatted_time}\n"
+            f"📝 {reason}"
         )
 
     except Exception as e:
-        print(f"ERROR in ban: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -876,30 +774,28 @@ async def ban(msg: Message, user_info: str, time_or_reason: str):
 @bot.on.message(text="/unban")
 async def unban_help(msg: Message):
     return await msg.answer(
-        "✅ КОМАНДА: РАЗБАНИТЬ\n\n"
-        "📝 Синтаксис:\n"
-        "/unban @пользователь\n"
-        "или ответьте на сообщение: /unban"
+        "✅ /unban [@user]\n\n"
+        "Примеры:\n"
+        "• /unban @Ivan\n"
+        "• (ответить) /unban"
     )
 
 @bot.on.message(text="/unban <user_info>")
 async def unban(msg: Message, user_info: str):
     conn, cur = db()
     try:
-        cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (msg.from_id, msg.peer_id))
-        sender_role = cur.fetchone()
-        sender_role_val = sender_role[0] if sender_role else 0
-        
+        sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('unban')
-        if sender_role_val < default_role and msg.from_id != OWNER_ID:
-            return await msg.answer(f"❌ ДОСТУП ЗАПРЕЩЁН\n\nТребуемый приоритет: {default_role}+")
+        
+        if sender_role < default_role and msg.from_id != OWNER_ID:
+            return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
         if not uid:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
-                return await msg.answer("❌ ОШИБКА: НЕВЕРНЫЙ ФОРМАТ")
+                return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         pid = msg.peer_id
         user_name = await get_user_name(uid)
@@ -909,15 +805,10 @@ async def unban(msg: Message, user_info: str):
         WHERE user_id=%s AND peer_id=%s AND type='ban'
         """, (uid, pid))
         
-        await msg.answer(
-            f"✅ БАН СНЯТ\n\n"
-            f"👤 {user_name} (id{uid})\n\n"
-            f"🔓 Может присоединиться\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
+        await msg.answer(f"✅ БАН СНЯТ\n👤 {user_name}")
 
     except Exception as e:
-        print(f"ERROR in unban: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -928,58 +819,42 @@ async def unban(msg: Message, user_info: str):
 @bot.on.message(text="/kick")
 async def kick_help(msg: Message):
     return await msg.answer(
-        "👢 КОМАНДА: ИСКЛЮЧЕНИЕ\n\n"
-        "📝 Синтаксис:\n"
-        "/kick @пользователь\n"
-        "или ответьте на сообщение: /kick"
+        "👢 /kick [@user]\n\n"
+        "Примеры:\n"
+        "• /kick @Ivan\n"
+        "• (ответить) /kick"
     )
 
 @bot.on.message(text="/kick <user_info>")
 async def kick(msg: Message, user_info: str):
     conn, cur = db()
     try:
-        cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (msg.from_id, msg.peer_id))
-        sender_role = cur.fetchone()
-        sender_role_val = sender_role[0] if sender_role else 0
-        
+        sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('kick')
-        if sender_role_val < default_role and msg.from_id != OWNER_ID:
-            return await msg.answer(f"❌ ДОСТУП ЗАПРЕЩЁН\n\nТребуемый приоритет: {default_role}+")
+        
+        if sender_role < default_role and msg.from_id != OWNER_ID:
+            return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
         if not uid:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
-                return await msg.answer("❌ ОШИБКА: НЕВЕРНЫЙ ФОРМАТ")
+                return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         if not can_punish_user(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
-            target_name = await get_user_name(uid)
-            cur.execute("SELECT role FROM users WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
-            target_role_res = cur.fetchone()
-            target_role = target_role_res[0] if target_role_res else 0
-            return await msg.answer(
-                f"❌ НЕЛЬЗЯ НАКАЗАТЬ\n\n"
-                f"👤 {target_name}\n"
-                f"📊 Его приоритет: {target_role}\n"
-                f"📊 Ваш приоритет: {sender_role_val}"
-            )
+            return await msg.answer("❌ НЕ МОЖЕШЬ НАКАЗАТЬ")
         
         user_name = await get_user_name(uid)
         
         try:
             await bot.api.messages.remove_chat_user(chat_id=msg.peer_id-2000000000, user_id=uid)
-            await msg.answer(
-                f"👢 ИСКЛЮЧЕН\n\n"
-                f"👤 {user_name} (id{uid})\n\n"
-                f"💬 Может присоединиться обратно\n\n"
-                f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-            )
+            await msg.answer(f"👢 ИСКЛЮЧЕН\n👤 {user_name}")
         except Exception as e:
-            await msg.answer(f"❌ НЕ УДАЛОСЬ ИСКЛЮЧИТЬ\n\n👤 {user_name}")
+            await msg.answer(f"❌ НЕ УДАЛОСЬ\n👤 {user_name}")
 
     except Exception as e:
-        print(f"ERROR in kick: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -990,10 +865,10 @@ async def kick(msg: Message, user_info: str):
 @bot.on.message(text="/snick")
 async def snick_help(msg: Message):
     return await msg.answer(
-        "🏷 КОМАНДА: НИК\n\n"
-        "📝 Синтаксис:\n"
-        "/snick [ник]\n"
-        "или ответьте на сообщение: /snick [ник]"
+        "🏷 /snick [ник]\n\n"
+        "Примеры:\n"
+        "• /snick ★ King ★\n"
+        "• (ответить) /snick 👑 Admin"
     )
 
 @bot.on.message(text="/snick <nick>")
@@ -1001,7 +876,7 @@ async def snick(msg: Message, nick: str):
     conn, cur = db()
     try:
         if len(nick) > 50:
-            return await msg.answer("❌ НИК СЛИШКОМ ДЛИННЫЙ (макс. 50 символов)")
+            return await msg.answer("❌ Ник слишком длинный (макс. 50)")
 
         target = extract(msg) or msg.from_id
         pid = msg.peer_id
@@ -1013,15 +888,10 @@ async def snick(msg: Message, nick: str):
         DO UPDATE SET nickname=%s
         """, (target, pid, nick, nick))
 
-        return await msg.answer(
-            f"✅ НИК УСТАНОВЛЕН\n\n"
-            f"👤 @id{target}\n"
-            f"🏷 {nick}\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
+        return await msg.answer(f"✅ НИК УСТАНОВЛЕН\n🏷 {nick}")
     
     except Exception as e:
-        print(f"ERROR in snick: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -1032,10 +902,10 @@ async def snick(msg: Message, nick: str):
 @bot.on.message(text="/rnick")
 async def rnick_help(msg: Message):
     return await msg.answer(
-        "🧹 КОМАНДА: УДАЛИТЬ НИК\n\n"
-        "📝 Синтаксис:\n"
-        "/rnick [@пользователь]\n"
-        "или ответьте на сообщение: /rnick"
+        "🧹 /rnick [@user]\n\n"
+        "Примеры:\n"
+        "• /rnick @Ivan\n"
+        "• (ответить) /rnick"
     )
 
 @bot.on.message(text="/rnick <user_info>")
@@ -1058,24 +928,14 @@ async def rnick(msg: Message, user_info: str = None):
         old_nick = res[0] if res else None
 
         if not old_nick:
-            return await msg.answer(
-                f"❌ НИК НЕ УСТАНОВЛЕН\n\n"
-                f"👤 @id{target}"
-            )
+            return await msg.answer(f"❌ НИК НЕ УСТАНОВЛЕН")
 
         cur.execute("UPDATE users SET nickname=NULL WHERE user_id=%s AND peer_id=%s", (target, pid))
 
-        user_name = await get_user_name(target)
-
-        return await msg.answer(
-            f"🧹 НИК УДАЛЁН\n\n"
-            f"👤 {user_name} (id{target})\n"
-            f"❌ Был: {old_nick}\n\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
+        return await msg.answer(f"🧹 НИК УДАЛЁН\n❌ Был: {old_nick}")
     
     except Exception as e:
-        print(f"ERROR in rnick: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -1086,10 +946,10 @@ async def rnick(msg: Message, user_info: str = None):
 @bot.on.message(text="/stats")
 async def stats_help(msg: Message):
     return await msg.answer(
-        "📊 КОМАНДА: СТАТИСТИКА\n\n"
-        "📝 Синтаксис:\n"
-        "/stats [@пользователь]\n"
-        "или ответьте на сообщение: /stats"
+        "📊 /stats [@user]\n\n"
+        "Примеры:\n"
+        "• /stats @Ivan\n"
+        "• (ответить) /stats"
     )
 
 @bot.on.message(text="/stats <user_info>")
@@ -1116,38 +976,23 @@ async def stats(msg: Message, user_info: str = None):
         res = cur.fetchone()
         
         if not res:
-            return await msg.answer(
-                f"📊 СТАТИСТИКА\n\n"
-                f"👤 {user_name} (id{uid})\n\n"
-                f"❌ Нет данных"
-            )
+            return await msg.answer(f"📊 СТАТИСТИКА\n👤 {user_name}\n❌ Нет данных")
         
         role, msgs, warn_count, nickname = res
-        
-        cur.execute("""
-        SELECT role_name FROM roles
-        WHERE peer_id=%s AND role_priority=%s
-        """, (pid, role))
-        
-        role_res = cur.fetchone()
-        role_name = role_res[0] if role_res else f"Уровень {role}"
-        
-        nick_info = f"🏷 Ник: {nickname}\n" if nickname else ""
+        role_name = get_role_name(cur, pid, role)
+        nick_info = f"🏷 {nickname}\n" if nickname else ""
         
         return await msg.answer(
             f"📊 СТАТИСТИКА\n\n"
             f"👤 {user_name}\n"
-            f"🆔 ID: {uid}\n\n"
-            f"🎖️ Роль: {role_name}\n"
-            f"📊 Приоритет: {role}\n"
-            f"💬 Сообщений: {msgs}\n"
-            f"⚠️ Предупреждений: {warn_count}/3\n"
-            f"{nick_info}\n"
-            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            f"📋 {role_name} ({role})\n"
+            f"💬 {msgs} сообщений\n"
+            f"⚠️ {warn_count}/3 предупреждений\n"
+            f"{nick_info}"
         )
     
     except Exception as e:
-        print(f"ERROR in stats: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
@@ -1164,16 +1009,10 @@ async def handler(msg: Message):
             return
 
         uid, pid = msg.from_id, msg.peer_id
-        text = msg.text.strip()
 
         # ===== AUTO KICK BANNED =====
-        cur.execute("""
-        SELECT end_at FROM punishments
-        WHERE user_id=%s AND peer_id=%s AND type='ban' 
-        AND (end_at IS NULL OR end_at > NOW())
-        """, (uid, pid))
-
-        if cur.fetchone():
+        ban_info = get_ban_info(cur, pid, uid)
+        if ban_info:
             try:
                 await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=uid)
             except:
@@ -1182,7 +1021,7 @@ async def handler(msg: Message):
 
         # ===== AUTO DELETE MUTE =====
         cur.execute("""
-        SELECT end_at FROM punishments
+        SELECT reason FROM punishments
         WHERE user_id=%s AND peer_id=%s AND type='mute'
         AND (end_at IS NULL OR end_at > NOW())
         """, (uid, pid))
@@ -1202,34 +1041,56 @@ async def handler(msg: Message):
         DO UPDATE SET msgs = users.msgs + 1
         """, (uid, pid))
 
-        if not text.startswith("/"):
-            return
-
     except Exception as e:
-        print(f"ERROR in handler: {e}")
+        print(f"ERROR: {e}")
         traceback.print_exc()
     finally:
         conn.close()
 
 # =========================
-# USER JOIN HANDLER - AUTO KICK BANNED
+# USER JOIN HANDLER - AUTO KICK BANNED WITH INFO
 # =========================
 @bot.on.new_chat_members()
 async def on_user_join(event):
-    """Автоматически кикает забаненных пользователей при присоединении"""
+    """Автоматически кикает забаненных и показывает информацию о бане"""
     try:
         pid = event.object.user_id
         peer_id = event.object.chat_id + 2000000000
         
-        if is_user_banned(peer_id, pid):
+        conn, cur = db()
+        ban_info = get_ban_info(cur, peer_id, pid)
+        
+        if ban_info:
+            reason, end_at = ban_info
+            
+            # Кикаем пользователя
             try:
                 await bot.api.messages.remove_chat_user(
                     chat_id=event.object.chat_id,
                     user_id=pid
                 )
-                print(f">>> AUTO KICKED BANNED USER {pid} FROM CHAT {peer_id}")
-            except Exception as e:
-                print(f"ERROR in auto kick: {e}")
+            except:
+                pass
+            
+            # Отправляем информацию о бане
+            user_name = await get_user_name(pid)
+            duration_text = format_time(end_at - datetime.now()) if end_at else "навсегда"
+            
+            try:
+                await bot.api.messages.send(
+                    peer_id=peer_id,
+                    message=f"🚫 ПОЛЬЗОВАТЕЛЬ ЗАБАНЕН\n\n"
+                            f"👤 {user_name} (id{pid})\n"
+                            f"⏰ {duration_text}\n"
+                            f"📝 {reason}\n\n"
+                            f"⚡ Автоматически исключен"
+                )
+            except:
+                pass
+            
+            print(f">>> AUTO KICKED BANNED USER {pid} FROM CHAT {peer_id}")
+        
+        conn.close()
     
     except Exception as e:
         print(f"ERROR in on_user_join: {e}")
