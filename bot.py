@@ -131,14 +131,6 @@ def get_ban_info(cur, peer_id, user_id):
     """, (user_id, peer_id))
     return cur.fetchone()
 
-def is_user_banned(peer_id, user_id):
-    """Проверяет, забанен ли пользователь в этой беседе"""
-    conn, cur = db()
-    try:
-        return get_ban_info(cur, peer_id, user_id) is not None
-    finally:
-        conn.close()
-
 def can_punish_user(cur, peer_id, punisher_id, target_id):
     """Проверяет, может ли punisher наказать target'а"""
     punisher_role = get_user_role(cur, peer_id, punisher_id)
@@ -228,7 +220,6 @@ async def help_cmd(msg: Message):
         
         text = "💠 FLEX BOT - КОМАНДЫ\n\n"
         
-        # ВСЕГДА ДОСТУПНО
         text += "🏷 НИКИ (всегда):\n"
         text += "/snick [ник] - Установить ник\n"
         text += "/rnick [@user] - Удалить ник\n\n"
@@ -238,7 +229,6 @@ async def help_cmd(msg: Message):
         text += "/roles - Список ролей\n"
         text += "/staff - Список модераторов\n\n"
         
-        # МОДЕРАЦИЯ (роль 10+)
         if user_role >= 10 or is_owner:
             text += "⚠️ МОДЕРАЦИЯ (роль 10+):\n"
             text += "/warn [id] [причина] - Предупреждение\n"
@@ -246,18 +236,15 @@ async def help_cmd(msg: Message):
             text += "/mute [id] [время] [причина] - Мут\n"
             text += "/unmute [id] - Снять мут\n\n"
         
-        # БАН (роль 50+)
         if user_role >= 50 or is_owner:
             text += "🚫 БАН (роль 50+):\n"
             text += "/ban [id] [время] [причина] - Бан\n"
             text += "/unban [id] - Разбан\n\n"
         
-        # РОЛИ (роль 60+)
         if user_role >= 60 or is_owner:
             text += "🎖️ ВЫДАЧА РОЛЕЙ (роль 60+):\n"
             text += "/giverole [@user] [приоритет] - Выдать роль\n\n"
         
-        # ВЛАДЕЛЕЦ
         if is_owner:
             text += "⚙️ ТОЛЬКО ВЛАДЕЛЕЦ:\n"
             text += "/sysrole @user [приоритет] - Выдать роль\n"
@@ -270,7 +257,7 @@ async def help_cmd(msg: Message):
         conn.close()
 
 # =========================
-# SYSTEM COMMANDS (OWNER ONLY)
+# SYSTEM COMMANDS
 # =========================
 @bot.on.message(text="/sysrole")
 async def sysrole_help(msg: Message):
@@ -316,11 +303,7 @@ async def sysrole_set(msg: Message, user_info: str, priority: str):
         user_name = await get_user_name(uid)
         role_name = get_role_name(cur, msg.peer_id, priority_int)
         
-        await msg.answer(
-            f"✅ РОЛЬ ВЫДАНА\n\n"
-            f"👤 {user_name}\n"
-            f"📋 {role_name} ({priority_int})"
-        )
+        await msg.answer(f"✅ РОЛЬ ВЫДАНА\n👤 {user_name}\n📋 {role_name} ({priority_int})")
     
     except Exception as e:
         print(f"ERROR: {e}")
@@ -374,7 +357,7 @@ async def addrole(msg: Message, priority: str, role_name: str):
         conn.close()
 
 # =========================
-# ROLES COMMANDS
+# ROLES
 # =========================
 @bot.on.message(text="/giverole")
 async def giverole_help(msg: Message):
@@ -413,11 +396,7 @@ async def giverole(msg: Message, user_info: str, priority: str):
         
         if not can_punish_user(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             target_role = get_user_role(cur, msg.peer_id, uid)
-            return await msg.answer(
-                f"❌ НЕ МОЖЕШЬ ВЫДАТЬ\n\n"
-                f"Его приоритет: {target_role}\n"
-                f"Твой: {sender_role}"
-            )
+            return await msg.answer(f"❌ НЕ МОЖЕШЬ ВЫДАТЬ\nЕго: {target_role}, Твой: {sender_role}")
         
         cur.execute("""
         INSERT INTO users (user_id, peer_id, role)
@@ -429,11 +408,7 @@ async def giverole(msg: Message, user_info: str, priority: str):
         user_name = await get_user_name(uid)
         role_name = get_role_name(cur, msg.peer_id, priority_int)
         
-        await msg.answer(
-            f"✅ РОЛЬ ВЫДАНА\n\n"
-            f"👤 {user_name}\n"
-            f"📋 {role_name} ({priority_int})"
-        )
+        await msg.answer(f"✅ РОЛЬ ВЫДАНА\n👤 {user_name}\n📋 {role_name} ({priority_int})")
     
     except Exception as e:
         print(f"ERROR: {e}")
@@ -453,10 +428,7 @@ async def list_roles(msg: Message):
         roles = cur.fetchall()
         
         if not roles:
-            return await msg.answer(
-                "📊 СПИСОК РОЛЕЙ\n\n"
-                "❌ Нет добавленных ролей"
-            )
+            return await msg.answer("📊 СПИСОК РОЛЕЙ\n❌ Нет добавленных ролей")
         
         text = "📊 РОЛИ В БЕСЕДЕ\n\n"
         for priority, name in roles:
@@ -479,10 +451,7 @@ async def staff(msg: Message):
         staff_list = cur.fetchall()
         
         if not staff_list:
-            return await msg.answer(
-                "👥 МОДЕРАЦИЯ\n\n"
-                "❌ Нет модераторов"
-            )
+            return await msg.answer("👥 МОДЕРАЦИЯ\n❌ Нет модераторов")
         
         text = "👥 МОДЕРАЦИЯ\n\n"
         for user_id, role_priority in staff_list:
@@ -499,7 +468,7 @@ async def staff(msg: Message):
         conn.close()
 
 # =========================
-# WARN COMMAND
+# WARN
 # =========================
 @bot.on.message(text="/warn")
 async def warn_help(msg: Message):
@@ -560,18 +529,9 @@ async def warn(msg: Message, user_info: str, reason: str = "Без причин�
             except:
                 pass
             
-            return await msg.answer(
-                f"🚫 АВТОБАН\n\n"
-                f"👤 {user_name}\n"
-                f"📋 3 предупреждения"
-            )
+            return await msg.answer(f"🚫 АВТОБАН\n👤 {user_name}\n📋 3 предупреждения")
 
-        await msg.answer(
-            f"⚠️ ПРЕДУПРЕЖДЕНИЕ\n\n"
-            f"👤 {user_name}\n"
-            f"📊 {warns}/3\n"
-            f"📝 {reason}"
-        )
+        await msg.answer(f"⚠️ ПРЕДУПРЕЖДЕНИЕ\n👤 {user_name}\n📊 {warns}/3\n📝 {reason}")
 
     except Exception as e:
         print(f"ERROR: {e}")
@@ -580,7 +540,7 @@ async def warn(msg: Message, user_info: str, reason: str = "Без причин�
         conn.close()
 
 # =========================
-# MUTE COMMAND
+# MUTE
 # =========================
 @bot.on.message(text="/mute")
 async def mute_help(msg: Message):
@@ -634,12 +594,7 @@ async def mute(msg: Message, user_info: str, time_or_reason: str):
         VALUES (%s, %s, 'mute', %s, %s)
         """, (uid, pid, end_time, reason))
 
-        await msg.answer(
-            f"🔇 МУТ\n\n"
-            f"👤 {user_name}\n"
-            f"⏰ {formatted_time}\n"
-            f"📝 {reason}"
-        )
+        await msg.answer(f"🔇 МУТ\n👤 {user_name}\n⏰ {formatted_time}\n📝 {reason}")
 
     except Exception as e:
         print(f"ERROR: {e}")
@@ -648,7 +603,7 @@ async def mute(msg: Message, user_info: str, time_or_reason: str):
         conn.close()
 
 # =========================
-# UNMUTE COMMAND
+# UNMUTE
 # =========================
 @bot.on.message(text="/unmute")
 async def unmute_help(msg: Message):
@@ -693,7 +648,7 @@ async def unmute(msg: Message, user_info: str):
         conn.close()
 
 # =========================
-# BAN COMMAND
+# BAN
 # =========================
 @bot.on.message(text="/ban")
 async def ban_help(msg: Message):
@@ -755,12 +710,7 @@ async def ban(msg: Message, user_info: str, time_or_reason: str):
         except:
             pass
 
-        await msg.answer(
-            f"🚫 БАН\n\n"
-            f"👤 {user_name}\n"
-            f"⏰ {formatted_time}\n"
-            f"📝 {reason}"
-        )
+        await msg.answer(f"🚫 БАН\n👤 {user_name}\n⏰ {formatted_time}\n📝 {reason}")
 
     except Exception as e:
         print(f"ERROR: {e}")
@@ -769,7 +719,7 @@ async def ban(msg: Message, user_info: str, time_or_reason: str):
         conn.close()
 
 # =========================
-# UNBAN COMMAND
+# UNBAN
 # =========================
 @bot.on.message(text="/unban")
 async def unban_help(msg: Message):
@@ -814,7 +764,7 @@ async def unban(msg: Message, user_info: str):
         conn.close()
 
 # =========================
-# KICK COMMAND
+# KICK
 # =========================
 @bot.on.message(text="/kick")
 async def kick_help(msg: Message):
@@ -860,7 +810,7 @@ async def kick(msg: Message, user_info: str):
         conn.close()
 
 # =========================
-# SNICK COMMAND
+# SNICK
 # =========================
 @bot.on.message(text="/snick")
 async def snick_help(msg: Message):
@@ -897,7 +847,7 @@ async def snick(msg: Message, nick: str):
         conn.close()
 
 # =========================
-# RNICK COMMAND
+# RNICK
 # =========================
 @bot.on.message(text="/rnick")
 async def rnick_help(msg: Message):
@@ -928,7 +878,7 @@ async def rnick(msg: Message, user_info: str = None):
         old_nick = res[0] if res else None
 
         if not old_nick:
-            return await msg.answer(f"❌ НИК НЕ УСТАНОВЛЕН")
+            return await msg.answer("❌ НИК НЕ УСТАНОВЛЕН")
 
         cur.execute("UPDATE users SET nickname=NULL WHERE user_id=%s AND peer_id=%s", (target, pid))
 
@@ -941,7 +891,7 @@ async def rnick(msg: Message, user_info: str = None):
         conn.close()
 
 # =========================
-# STATS COMMAND
+# STATS
 # =========================
 @bot.on.message(text="/stats")
 async def stats_help(msg: Message):
@@ -998,6 +948,66 @@ async def stats(msg: Message, user_info: str = None):
         conn.close()
 
 # =========================
+# SERVICE MESSAGE HANDLER (AUTO KICK BANNED)
+# =========================
+@bot.on.raw_event(object_type="message", group_id=None)
+async def service_handler(event):
+    """Обработка service message когда пользователя добавляют в беседу"""
+    try:
+        if event["type"] != "message_new":
+            return
+        
+        msg_data = event["object"]["message"]
+        
+        # Проверяем, есть ли action (добавление пользователя)
+        if msg_data.get("action"):
+            action = msg_data["action"]
+            
+            # Если это действие добавления в чат
+            if action.get("type") == "chat_invite" or action.get("type") == "chat_add":
+                uid = action.get("member_id")
+                peer_id = msg_data.get("peer_id")
+                
+                if uid and peer_id:
+                    conn, cur = db()
+                    ban_info = get_ban_info(cur, peer_id, uid)
+                    conn.close()
+                    
+                    if ban_info:
+                        reason, end_at = ban_info
+                        
+                        # Кикаем пользователя
+                        try:
+                            await bot.api.messages.remove_chat_user(
+                                chat_id=peer_id - 2000000000,
+                                user_id=uid
+                            )
+                        except:
+                            pass
+                        
+                        # Отправляем информацию о бане
+                        try:
+                            user_name = await get_user_name(uid)
+                            duration_text = format_time(end_at - datetime.now()) if end_at else "навсегда"
+                            
+                            await bot.api.messages.send(
+                                peer_id=peer_id,
+                                message=f"🚫 ПОЛЬЗОВАТЕЛЬ ЗАБАНЕН\n\n"
+                                        f"👤 {user_name} (id{uid})\n"
+                                        f"⏰ {duration_text}\n"
+                                        f"📝 {reason}\n\n"
+                                        f"⚡ Автоматически исключен"
+                            )
+                        except:
+                            pass
+                        
+                        print(f">>> AUTO KICKED BANNED USER {uid} FROM CHAT {peer_id}")
+    
+    except Exception as e:
+        print(f"ERROR in service_handler: {e}")
+        traceback.print_exc()
+
+# =========================
 # MAIN HANDLER
 # =========================
 @bot.on.message()
@@ -1010,7 +1020,6 @@ async def handler(msg: Message):
 
         uid, pid = msg.from_id, msg.peer_id
 
-        # ===== AUTO KICK BANNED =====
         ban_info = get_ban_info(cur, pid, uid)
         if ban_info:
             try:
@@ -1019,7 +1028,6 @@ async def handler(msg: Message):
                 pass
             return
 
-        # ===== AUTO DELETE MUTE =====
         cur.execute("""
         SELECT reason FROM punishments
         WHERE user_id=%s AND peer_id=%s AND type='mute'
@@ -1033,7 +1041,6 @@ async def handler(msg: Message):
                 pass
             return
 
-        # ===== UPDATE USER =====
         cur.execute("""
         INSERT INTO users (user_id, peer_id, msgs)
         VALUES (%s, %s, 1)
@@ -1046,55 +1053,6 @@ async def handler(msg: Message):
         traceback.print_exc()
     finally:
         conn.close()
-
-# =========================
-# USER JOIN HANDLER - AUTO KICK BANNED WITH INFO
-# =========================
-@bot.on.new_chat_members()
-async def on_user_join(event):
-    """Автоматически кикает забаненных и показывает информацию о бане"""
-    try:
-        pid = event.object.user_id
-        peer_id = event.object.chat_id + 2000000000
-        
-        conn, cur = db()
-        ban_info = get_ban_info(cur, peer_id, pid)
-        
-        if ban_info:
-            reason, end_at = ban_info
-            
-            # Кикаем пользователя
-            try:
-                await bot.api.messages.remove_chat_user(
-                    chat_id=event.object.chat_id,
-                    user_id=pid
-                )
-            except:
-                pass
-            
-            # Отправляем информацию о бане
-            user_name = await get_user_name(pid)
-            duration_text = format_time(end_at - datetime.now()) if end_at else "навсегда"
-            
-            try:
-                await bot.api.messages.send(
-                    peer_id=peer_id,
-                    message=f"🚫 ПОЛЬЗОВАТЕЛЬ ЗАБАНЕН\n\n"
-                            f"👤 {user_name} (id{pid})\n"
-                            f"⏰ {duration_text}\n"
-                            f"📝 {reason}\n\n"
-                            f"⚡ Автоматически исключен"
-                )
-            except:
-                pass
-            
-            print(f">>> AUTO KICKED BANNED USER {pid} FROM CHAT {peer_id}")
-        
-        conn.close()
-    
-    except Exception as e:
-        print(f"ERROR in on_user_join: {e}")
-        traceback.print_exc()
 
 # =========================
 if __name__ == "__main__":
