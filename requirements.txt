@@ -1,2 +1,2 @@
-vkbottle>=4.4
+vkbottle>=4.3.12
 psycopg2-binary
