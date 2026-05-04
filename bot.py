@@ -533,6 +533,7 @@ async def sysrole_help(msg: Message):
 
 @bot.on.message(text="/sysrole <priority>")
 async def sysrole_reply(msg: Message, priority: str):
+    """Выдача роли через ответ на сообщение"""
     if msg.from_id != OWNER_ID:
         return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН")
     
@@ -544,21 +545,40 @@ async def sysrole_reply(msg: Message, priority: str):
 
 @bot.on.message(text="/sysrole <user_info> <priority>")
 async def sysrole_set(msg: Message, user_info: str, priority: str):
+    """Выдача роли с указанием пользователя"""
     if msg.from_id != OWNER_ID:
         return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН")
     
-    uid = extract(msg)
+    # Извлекаем ID из упоминания или username
+    uid = None
+    
+    # Проверяем reply_message сначала
+    if msg.reply_message:
+        uid = msg.reply_message.from_id
+    else:
+        # Пробуем извлечь из текста
+        r = re.search(r"\[id(\d+)\|", msg.text)
+        if r:
+            uid = int(r.group(1))
+        else:
+            r = re.search(r"id(\d+)", msg.text)
+            if r:
+                uid = int(r.group(1))
+            else:
+                # Пробуем как username
+                clean_user = user_info.replace("@", "").replace("[", "").replace("]", "")
+                if clean_user.isdigit():
+                    uid = int(clean_user)
+                else:
+                    uid = await resolve_user_id(clean_user)
+    
     if not uid:
-        try:
-            uid = await resolve_user_id(user_info)
-            if not uid:
-                return await msg.answer("❌ ОШИБКА: неверный формат пользователя")
-        except:
-            return await msg.answer("❌ ОШИБКА: неверный формат пользователя")
+        return await msg.answer("❌ ОШИБКА: Не удалось определить пользователя\n\nУкажите @username или ID пользователя")
     
     await process_sysrole(msg, uid, priority)
 
 async def process_sysrole(msg: Message, uid: int, priority: str):
+    """Обработка команды sysrole"""
     conn, cur = db()
     try:
         try:
