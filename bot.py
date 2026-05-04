@@ -5,7 +5,6 @@ import logging
 import psycopg2
 from datetime import datetime, timedelta
 from vkbottle.bot import Bot, Message
-from vkbottle import BaseMiddleware
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -77,16 +76,31 @@ def init():
             );
             """)
 
+            # Создаём таблицу если её нет
             cur.execute("""
             CREATE TABLE IF NOT EXISTS cmd_permissions(
                 id SERIAL PRIMARY KEY,
                 peer_id BIGINT,
                 cmd_name TEXT,
-                required_role INT DEFAULT 10,
                 created_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(peer_id, cmd_name)
             );
             """)
+            
+            # Проверяем, существует ли колонка required_role
+            cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='cmd_permissions' AND column_name='required_role'
+            """)
+            
+            if not cur.fetchone():
+                # Добавляем колонку, если её нет
+                cur.execute("""
+                ALTER TABLE cmd_permissions 
+                ADD COLUMN required_role INT DEFAULT 10
+                """)
+                logger.info(">>> Added required_role column to cmd_permissions")
 
             # Вставляем стандартные права для команд
             default_permissions = [
@@ -281,12 +295,12 @@ async def kick_user(peer_id, user_id):
         logger.error(f"Failed to kick user {user_id}: {e}")
         return False
 
-async def delete_message(peer_id, message_id):
+async def delete_message(peer_id, conversation_message_id):
     """Удаляет сообщение"""
     try:
         await bot.api.messages.delete(
             peer_id=peer_id,
-            conversation_message_ids=[message_id],
+            conversation_message_ids=[conversation_message_id],
             delete_for_all=True
         )
         return True
@@ -1817,7 +1831,8 @@ async def handler(msg: Message):
         # Проверяем, замучен ли пользователь
         if is_user_muted(pid, uid):
             # Удаляем сообщение замученного пользователя
-            await delete_message(pid, msg.conversation_message_id)
+            if hasattr(msg, 'conversation_message_id'):
+                await delete_message(pid, msg.conversation_message_id)
             return
 
         # Обновляем статистику
