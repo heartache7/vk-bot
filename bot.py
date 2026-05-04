@@ -531,7 +531,7 @@ async def sysrole_help(msg: Message):
         "в обход всех проверок прав"
     )
 
-@bot.on.message(text="/sysrole <priority>")
+@bot.on.message(text=["/sysrole <priority>"])
 async def sysrole_reply(msg: Message, priority: str):
     """Выдача роли через ответ на сообщение"""
     if msg.from_id != OWNER_ID:
@@ -543,7 +543,7 @@ async def sysrole_reply(msg: Message, priority: str):
     uid = msg.reply_message.from_id
     await process_sysrole(msg, uid, priority)
 
-@bot.on.message(text="/sysrole <user_info> <priority>")
+@bot.on.message(text=["/sysrole <user_info> <priority>"])
 async def sysrole_set(msg: Message, user_info: str, priority: str):
     """Выдача роли с указанием пользователя"""
     if msg.from_id != OWNER_ID:
@@ -556,24 +556,31 @@ async def sysrole_set(msg: Message, user_info: str, priority: str):
     if msg.reply_message:
         uid = msg.reply_message.from_id
     else:
-        # Пробуем извлечь из текста
+        # Пробуем извлечь из текста [id123|@user]
         r = re.search(r"\[id(\d+)\|", msg.text)
         if r:
             uid = int(r.group(1))
         else:
+            # Пробуем id123
             r = re.search(r"id(\d+)", msg.text)
             if r:
                 uid = int(r.group(1))
             else:
-                # Пробуем как username
-                clean_user = user_info.replace("@", "").replace("[", "").replace("]", "")
+                # Пробуем как username (@user)
+                clean_user = user_info.replace("@", "").replace("[", "").replace("]", "").strip()
                 if clean_user.isdigit():
                     uid = int(clean_user)
                 else:
-                    uid = await resolve_user_id(clean_user)
+                    try:
+                        # Ищем пользователя через VK API
+                        resolved = await resolve_user_id(clean_user)
+                        if resolved:
+                            uid = resolved
+                    except:
+                        pass
     
     if not uid:
-        return await msg.answer("❌ ОШИБКА: Не удалось определить пользователя\n\nУкажите @username или ID пользователя")
+        return await msg.answer("❌ ОШИБКА: Не удалось определить пользователя\n\nИспользуйте:\n• @username\n• Ответ на сообщение\n• ID пользователя")
     
     await process_sysrole(msg, uid, priority)
 
@@ -865,9 +872,6 @@ async def list_roles(msg: Message):
     finally:
         conn.close()
 
-# =========================
-# STAFF COMMAND
-# =========================
 @bot.on.message(text="/staff")
 async def staff(msg: Message):
     conn, cur = db()
@@ -878,6 +882,7 @@ async def staff(msg: Message):
         SELECT user_id, role FROM users
         WHERE peer_id=%s AND role > 0
         ORDER BY role DESC
+        LIMIT 30
         """, (peer_id,))
         
         staff_list = cur.fetchall()
@@ -891,42 +896,51 @@ async def staff(msg: Message):
         
         text = "👥 СПИСОК ПЕРСОНАЛА БЕСЕДЫ\n\n"
         
+        # Получаем все роли для этой беседы
         cur.execute("""
         SELECT role_priority, role_name FROM roles
         WHERE peer_id=%s
         """, (peer_id,))
-        roles_dict = {role[0]: role[1] for role in cur.fetchall()}
+        roles_dict = {}
+        for role in cur.fetchall():
+            roles_dict[role[0]] = role[1]
         
         for user_id, role_priority in staff_list:
-            user_name = await get_user_name(user_id)
+            try:
+                user_name = await get_user_name(user_id)
+            except:
+                user_name = f"Пользователь {user_id}"
+            
             role_name = roles_dict.get(role_priority, f"Уровень {role_priority}")
             
-            if is_user_banned(peer_id, user_id):
-                status = "🚫 ЗАБАНЕН"
-            elif is_user_muted(peer_id, user_id):
-                status = "🔇 ЗАМУЧЕН"
-            else:
-                status = "✅ Активен"
+            # Проверяем статус
+            status = "✅ Активен"
+            try:
+                if is_user_banned(peer_id, user_id):
+                    status = "🚫 ЗАБАНЕН"
+                elif is_user_muted(peer_id, user_id):
+                    status = "🔇 ЗАМУЧЕН"
+            except:
+                pass
             
             text += f"👤 {user_name} ({status})\n"
             text += f"   📊 {role_name} (приоритет: {role_priority})\n"
             
-            cur.execute("SELECT nickname FROM users WHERE user_id=%s AND peer_id=%s", (user_id, peer_id))
-            nick_res = cur.fetchone()
-            if nick_res and nick_res[0]:
-                text += f"   🏷 Ник: {nick_res[0]}\n"
-            
-            cur.execute("SELECT warn_count FROM users WHERE user_id=%s AND peer_id=%s", (user_id, peer_id))
-            warn_res = cur.fetchone()
-            if warn_res and warn_res[0] > 0:
-                text += f"   ⚠️ Предупреждений: {warn_res[0]}/3\n"
-            
+            # Проверяем ник
             try:
-                res = await bot.api.messages.get_conversation_members(peer_id=peer_id)
-                for m in res.items:
-                    if m.member_id == user_id and getattr(m, "is_owner", False):
-                        text += "   👑 Создатель беседы\n"
-                        break
+                cur.execute("SELECT nickname FROM users WHERE user_id=%s AND peer_id=%s", (user_id, peer_id))
+                nick_res = cur.fetchone()
+                if nick_res and nick_res[0]:
+                    text += f"   🏷 Ник: {nick_res[0]}\n"
+            except:
+                pass
+            
+            # Проверяем предупреждения
+            try:
+                cur.execute("SELECT warn_count FROM users WHERE user_id=%s AND peer_id=%s", (user_id, peer_id))
+                warn_res = cur.fetchone()
+                if warn_res and warn_res[0] > 0:
+                    text += f"   ⚠️ Предупреждений: {warn_res[0]}/3\n"
             except:
                 pass
             
