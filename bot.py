@@ -259,7 +259,7 @@ async def help_cmd(msg: Message):
 # =========================
 # SYSTEM COMMANDS
 # =========================
-@bot.on.message(text="/sysrole")
+@bot.on.message(re.compile(r"^/sysrole$"))
 async def sysrole_help(msg: Message):
     if msg.from_id != OWNER_ID:
         return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН")
@@ -271,15 +271,21 @@ async def sysrole_help(msg: Message):
         "• (ответить) /sysrole 60"
     )
 
-@bot.on.message(text="/sysrole <user_info> <priority>")
-async def sysrole_set(msg: Message, user_info: str, priority: str):
+@bot.on.message(re.compile(r"^/sysrole\s+(.+?)\s+(\d+)$"))
+async def sysrole_set(msg: Message):
     if msg.from_id != OWNER_ID:
         return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН")
     
     conn, cur = db()
     try:
+        match = re.match(r"^/sysrole\s+(.+?)\s+(\d+)$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info, priority_str = match.groups()
+        
         try:
-            priority_int = int(priority)
+            priority_int = int(priority_str)
         except:
             return await msg.answer("❌ Приоритет должен быть числом")
         
@@ -311,7 +317,7 @@ async def sysrole_set(msg: Message, user_info: str, priority: str):
     finally:
         conn.close()
 
-@bot.on.message(text="/addrole")
+@bot.on.message(re.compile(r"^/addrole$"))
 async def addrole_help(msg: Message):
     if msg.from_id != OWNER_ID:
         return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН")
@@ -323,15 +329,21 @@ async def addrole_help(msg: Message):
         "• /addrole 10 VIP"
     )
 
-@bot.on.message(text="/addrole <priority> <role_name>")
-async def addrole(msg: Message, priority: str, role_name: str):
+@bot.on.message(re.compile(r"^/addrole\s+(\d+)\s+(.+)$"))
+async def addrole(msg: Message):
     if msg.from_id != OWNER_ID:
         return await msg.answer("❌ ДОСТУП ЗАПРЕЩЁН")
     
     conn, cur = db()
     try:
+        match = re.match(r"^/addrole\s+(\d+)\s+(.+)$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        priority_str, role_name = match.groups()
+        
         try:
-            priority = int(priority)
+            priority = int(priority_str)
         except:
             return await msg.answer("❌ Приоритет должен быть числом")
         
@@ -359,7 +371,7 @@ async def addrole(msg: Message, priority: str, role_name: str):
 # =========================
 # ROLES
 # =========================
-@bot.on.message(text="/giverole")
+@bot.on.message(re.compile(r"^/giverole$"))
 async def giverole_help(msg: Message):
     return await msg.answer(
         "🎖️ /giverole [@user] [приоритет]\n\n"
@@ -369,10 +381,16 @@ async def giverole_help(msg: Message):
         "• (ответить) /giverole 50"
     )
 
-@bot.on.message(text="/giverole <user_info> <priority>")
-async def giverole(msg: Message, user_info: str, priority: str):
+@bot.on.message(re.compile(r"^/giverole\s+(.+?)\s+(\d+)$"))
+async def giverole(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/giverole\s+(.+?)\s+(\d+)$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info, priority_str = match.groups()
+        
         sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('giverole')
         
@@ -387,7 +405,7 @@ async def giverole(msg: Message, user_info: str, priority: str):
                 return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         try:
-            priority_int = int(priority)
+            priority_int = int(priority_str)
         except:
             return await msg.answer("❌ Приоритет должен быть числом")
         
@@ -470,7 +488,7 @@ async def staff(msg: Message):
 # =========================
 # WARN
 # =========================
-@bot.on.message(text="/warn")
+@bot.on.message(re.compile(r"^/warn$"))
 async def warn_help(msg: Message):
     return await msg.answer(
         "⚠️ /warn [@user] [причина]\n\n"
@@ -480,10 +498,17 @@ async def warn_help(msg: Message):
         "• (ответить) /warn флуд"
     )
 
-@bot.on.message(text="/warn <user_info> <reason>")
-async def warn(msg: Message, user_info: str, reason: str = "Без причины"):
+@bot.on.message(re.compile(r"^/warn\s+(.+?)(?:\s+(.+))?$"))
+async def warn(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/warn\s+(.+?)(?:\s+(.+))?$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info = match.group(1)
+        reason = match.group(2) or "Без причины"
+        
         sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('warn')
         
@@ -542,7 +567,7 @@ async def warn(msg: Message, user_info: str, reason: str = "Без причин�
 # =========================
 # MUTE
 # =========================
-@bot.on.message(text="/mute")
+@bot.on.message(re.compile(r"^/mute$"))
 async def mute_help(msg: Message):
     return await msg.answer(
         "🔇 /mute [@user] [время] [причина]\n\n"
@@ -552,10 +577,17 @@ async def mute_help(msg: Message):
         "• (ответить) /mute 1h"
     )
 
-@bot.on.message(text="/mute <user_info> <time_or_reason>")
-async def mute(msg: Message, user_info: str, time_or_reason: str):
+@bot.on.message(re.compile(r"^/mute\s+(.+?)(?:\s+(.+))?$"))
+async def mute(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/mute\s+(.+?)(?:\s+(.+))?$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info = match.group(1)
+        time_or_reason = match.group(2) or ""
+        
         sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('mute')
         
@@ -605,7 +637,7 @@ async def mute(msg: Message, user_info: str, time_or_reason: str):
 # =========================
 # UNMUTE
 # =========================
-@bot.on.message(text="/unmute")
+@bot.on.message(re.compile(r"^/unmute$"))
 async def unmute_help(msg: Message):
     return await msg.answer(
         "🔊 /unmute [@user]\n\n"
@@ -614,10 +646,16 @@ async def unmute_help(msg: Message):
         "• (ответить) /unmute"
     )
 
-@bot.on.message(text="/unmute <user_info>")
-async def unmute(msg: Message, user_info: str):
+@bot.on.message(re.compile(r"^/unmute(?:\s+(.+))?$"))
+async def unmute(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/unmute(?:\s+(.+))?$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info = match.group(1)
+        
         sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('unmute')
         
@@ -625,11 +663,14 @@ async def unmute(msg: Message, user_info: str):
             return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
-        if not uid:
+        if not uid and user_info:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
                 return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        if not uid:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         pid = msg.peer_id
         user_name = await get_user_name(uid)
@@ -650,7 +691,7 @@ async def unmute(msg: Message, user_info: str):
 # =========================
 # BAN
 # =========================
-@bot.on.message(text="/ban")
+@bot.on.message(re.compile(r"^/ban$"))
 async def ban_help(msg: Message):
     return await msg.answer(
         "🚫 /ban [@user] [время] [причина]\n\n"
@@ -660,10 +701,17 @@ async def ban_help(msg: Message):
         "• (ответить) /ban тролль"
     )
 
-@bot.on.message(text="/ban <user_info> <time_or_reason>")
-async def ban(msg: Message, user_info: str, time_or_reason: str):
+@bot.on.message(re.compile(r"^/ban\s+(.+?)(?:\s+(.+))?$"))
+async def ban(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/ban\s+(.+?)(?:\s+(.+))?$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info = match.group(1)
+        time_or_reason = match.group(2) or ""
+        
         sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('ban')
         
@@ -721,7 +769,7 @@ async def ban(msg: Message, user_info: str, time_or_reason: str):
 # =========================
 # UNBAN
 # =========================
-@bot.on.message(text="/unban")
+@bot.on.message(re.compile(r"^/unban$"))
 async def unban_help(msg: Message):
     return await msg.answer(
         "✅ /unban [@user]\n\n"
@@ -730,10 +778,16 @@ async def unban_help(msg: Message):
         "• (ответить) /unban"
     )
 
-@bot.on.message(text="/unban <user_info>")
-async def unban(msg: Message, user_info: str):
+@bot.on.message(re.compile(r"^/unban(?:\s+(.+))?$"))
+async def unban(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/unban(?:\s+(.+))?$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info = match.group(1)
+        
         sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('unban')
         
@@ -741,11 +795,14 @@ async def unban(msg: Message, user_info: str):
             return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
-        if not uid:
+        if not uid and user_info:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
                 return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        if not uid:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         pid = msg.peer_id
         user_name = await get_user_name(uid)
@@ -766,7 +823,7 @@ async def unban(msg: Message, user_info: str):
 # =========================
 # KICK
 # =========================
-@bot.on.message(text="/kick")
+@bot.on.message(re.compile(r"^/kick$"))
 async def kick_help(msg: Message):
     return await msg.answer(
         "👢 /kick [@user]\n\n"
@@ -775,10 +832,16 @@ async def kick_help(msg: Message):
         "• (ответить) /kick"
     )
 
-@bot.on.message(text="/kick <user_info>")
-async def kick(msg: Message, user_info: str):
+@bot.on.message(re.compile(r"^/kick(?:\s+(.+))?$"))
+async def kick(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/kick(?:\s+(.+))?$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info = match.group(1)
+        
         sender_role = get_user_role(cur, msg.peer_id, msg.from_id)
         default_role = get_default_cmd_role('kick')
         
@@ -786,11 +849,14 @@ async def kick(msg: Message, user_info: str):
             return await msg.answer(f"❌ ТРЕБУЕМЫЙ ПРИОРИТЕТ: {default_role}+")
         
         uid = extract(msg)
-        if not uid:
+        if not uid and user_info:
             try:
                 uid = int(user_info.replace("@", "").replace("id", ""))
             except:
                 return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        if not uid:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
         
         if not can_punish_user(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             return await msg.answer("❌ НЕ МОЖЕШЬ НАКАЗАТЬ")
@@ -812,7 +878,7 @@ async def kick(msg: Message, user_info: str):
 # =========================
 # SNICK
 # =========================
-@bot.on.message(text="/snick")
+@bot.on.message(re.compile(r"^/snick$"))
 async def snick_help(msg: Message):
     return await msg.answer(
         "🏷 /snick [ник]\n\n"
@@ -821,10 +887,16 @@ async def snick_help(msg: Message):
         "• (ответить) /snick 👑 Admin"
     )
 
-@bot.on.message(text="/snick <nick>")
-async def snick(msg: Message, nick: str):
+@bot.on.message(re.compile(r"^/snick\s+(.+)$"))
+async def snick(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/snick\s+(.+)$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        nick = match.group(1)
+        
         if len(nick) > 50:
             return await msg.answer("❌ Ник слишком длинный (макс. 50)")
 
@@ -849,7 +921,7 @@ async def snick(msg: Message, nick: str):
 # =========================
 # RNICK
 # =========================
-@bot.on.message(text="/rnick")
+@bot.on.message(re.compile(r"^/rnick$"))
 async def rnick_help(msg: Message):
     return await msg.answer(
         "🧹 /rnick [@user]\n\n"
@@ -858,10 +930,16 @@ async def rnick_help(msg: Message):
         "• (ответить) /rnick"
     )
 
-@bot.on.message(text="/rnick <user_info>")
-async def rnick(msg: Message, user_info: str = None):
+@bot.on.message(re.compile(r"^/rnick(?:\s+(.+))?$"))
+async def rnick(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/rnick(?:\s+(.+))?$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info = match.group(1)
+        
         target = extract(msg)
         if not target and user_info:
             try:
@@ -893,7 +971,7 @@ async def rnick(msg: Message, user_info: str = None):
 # =========================
 # STATS
 # =========================
-@bot.on.message(text="/stats")
+@bot.on.message(re.compile(r"^/stats$"))
 async def stats_help(msg: Message):
     return await msg.answer(
         "📊 /stats [@user]\n\n"
@@ -902,10 +980,16 @@ async def stats_help(msg: Message):
         "• (ответить) /stats"
     )
 
-@bot.on.message(text="/stats <user_info>")
-async def stats(msg: Message, user_info: str = None):
+@bot.on.message(re.compile(r"^/stats(?:\s+(.+))?$"))
+async def stats(msg: Message):
     conn, cur = db()
     try:
+        match = re.match(r"^/stats(?:\s+(.+))?$", msg.text)
+        if not match:
+            return await msg.answer("❌ НЕВЕРНЫЙ ФОРМАТ")
+        
+        user_info = match.group(1)
+        
         uid = extract(msg)
         if not uid and user_info:
             try:
