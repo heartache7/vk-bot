@@ -947,87 +947,48 @@ async def stats(msg: Message, user_info: str = None):
     finally:
         conn.close()
 
-# =========================
-# SERVICE MESSAGE HANDLER (AUTO KICK BANNED)
-# =========================
-@bot.on.raw_event(object_type="message", group_id=None)
-async def service_handler(event):
-    """Обработка service message когда пользователя добавляют в беседу"""
-    try:
-        if event["type"] != "message_new":
-            return
-        
-        msg_data = event["object"]["message"]
-        
-        # Проверяем, есть ли action (добавление пользователя)
-        if msg_data.get("action"):
-            action = msg_data["action"]
-            
-            # Если это действие добавления в чат
-            if action.get("type") == "chat_invite" or action.get("type") == "chat_add":
-                uid = action.get("member_id")
-                peer_id = msg_data.get("peer_id")
-                
-                if uid and peer_id:
-                    conn, cur = db()
-                    ban_info = get_ban_info(cur, peer_id, uid)
-                    conn.close()
-                    
-                    if ban_info:
-                        reason, end_at = ban_info
-                        
-                        # Кикаем пользователя
-                        try:
-                            await bot.api.messages.remove_chat_user(
-                                chat_id=peer_id - 2000000000,
-                                user_id=uid
-                            )
-                        except:
-                            pass
-                        
-                        # Отправляем информацию о бане
-                        try:
-                            user_name = await get_user_name(uid)
-                            duration_text = format_time(end_at - datetime.now()) if end_at else "навсегда"
-                            
-                            await bot.api.messages.send(
-                                peer_id=peer_id,
-                                message=f"🚫 ПОЛЬЗОВАТЕЛЬ ЗАБАНЕН\n\n"
-                                        f"👤 {user_name} (id{uid})\n"
-                                        f"⏰ {duration_text}\n"
-                                        f"📝 {reason}\n\n"
-                                        f"⚡ Автоматически исключен"
-                            )
-                        except:
-                            pass
-                        
-                        print(f">>> AUTO KICKED BANNED USER {uid} FROM CHAT {peer_id}")
-    
-    except Exception as e:
-        print(f"ERROR in service_handler: {e}")
-        traceback.print_exc()
 
-# =========================
-# MAIN HANDLER
-# =========================
 @bot.on.message()
 async def handler(msg: Message):
     conn, cur = db()
 
     try:
-        if not msg.text:
-            return
-
         uid, pid = msg.from_id, msg.peer_id
 
+        # ПРОВЕРКА НА БАН
         ban_info = get_ban_info(cur, pid, uid)
         if ban_info:
+            reason, end_at = ban_info
+            duration_text = format_time(end_at - datetime.now()) if end_at else "навсегда"
+            
+            # Кикаем пользователя
             try:
                 await bot.api.messages.remove_chat_user(chat_id=pid-2000000000, user_id=uid)
             except:
                 pass
+            
+            # Отправляем информацию о бане в беседу
+            try:
+                user_name = await get_user_name(uid)
+                await bot.api.messages.send(
+                    peer_id=pid,
+                    message=f"🚫 ПОЛЬЗОВАТЕЛЬ ЗАБАНЕН И ИСКЛЮЧЕН\n\n"
+                            f"👤 {user_name} (id{uid})\n"
+                            f"⏰ Бан на: {duration_text}\n"
+                            f"📝 Причина: {reason}\n\n"
+                            f"📌 ИНСТРУКЦИЯ:\n"
+                            f"Для обжалования напишите владельцу беседы"
+                )
+            except:
+                pass
+            
+            print(f">>> AUTO KICKED BANNED USER {uid} FROM CHAT {pid}")
             return
 
+        if not msg.text:
+            return
+
+        # ПРОВЕРКА НА МУТ
         cur.execute("""
         SELECT reason FROM punishments
         WHERE user_id=%s AND peer_id=%s AND type='mute'
@@ -1041,6 +1002,7 @@ async def handler(msg: Message):
                 pass
             return
 
+        # ОБНОВЛЯЕМ СТАТИСТИКУ
         cur.execute("""
         INSERT INTO users (user_id, peer_id, msgs)
         VALUES (%s, %s, 1)
