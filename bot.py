@@ -1841,36 +1841,8 @@ async def handler(msg: Message):
 # =========================
 # AUTO KICK BANNED USERS
 # =========================
-@bot.on.chat_invite_user()
-async def on_chat_invite(event):
-    """Автоматически кикает забаненных пользователей при добавлении"""
-    try:
-        user_id = event.event.member_id
-        peer_id = event.event.peer_id
-        
-        logger.info(f"New member joined: user_id={user_id}, peer_id={peer_id}")
-        
-        if is_user_banned(peer_id, user_id):
-            logger.info(f"Banned user {user_id} tried to join, kicking...")
-            await kick_user(peer_id, user_id)
-            
-            user_name = await get_user_name(user_id)
-            
-            try:
-                await bot.api.messages.send(
-                    peer_id=peer_id,
-                    message=f"🚫 ПОПЫТКА ВХОДА ЗАБАНЕННОГО\n\n"
-                           f"👤 {user_name} (id{user_id})\n"
-                           f"❌ Пользователь забанен и был исключён\n\n"
-                           f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-                    random_id=0
-                )
-            except Exception as e:
-                logger.error(f"Failed to send notification: {e}")
-    
-    except Exception as e:
-        logger.error(f"ERROR in on_chat_invite: {e}")
-        traceback.print_exc()
+# Авто-кик забаненных работает через главный обработчик сообщений (handler)
+# Пользователь будет кикнут при попытке отправить любое сообщение
 
 # =========================
 # PERIODIC CHECK FOR EXPIRED PUNISHMENTS
@@ -1881,17 +1853,20 @@ async def check_expired_punishments():
         try:
             conn, cur = db()
             try:
+                # Получаем истёкшие баны до удаления
                 cur.execute("""
                 SELECT user_id, peer_id FROM punishments
                 WHERE type='ban' AND end_at IS NOT NULL AND end_at < NOW()
                 """)
                 expired_bans = cur.fetchall()
                 
+                # Удаляем все истёкшие наказания
                 cur.execute("""
                 DELETE FROM punishments
                 WHERE end_at IS NOT NULL AND end_at < NOW()
                 """)
                 
+                # Уведомляем о разбане
                 for user_id, peer_id in expired_bans:
                     logger.info(f"Ban expired for user {user_id} in chat {peer_id}")
                     try:
