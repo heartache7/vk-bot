@@ -178,7 +178,6 @@ def get_user_role(cur, peer_id, user_id):
     return res[0] if res else 0
 
 def can_punish_user(cur, peer_id, punisher_id, target_id):
-    """Проверяет, может ли punisher взаимодействовать с target'ом"""
     if punisher_id == OWNER_ID: return True
     punisher_role = get_user_role(cur, peer_id, punisher_id)
     target_role = get_user_role(cur, peer_id, target_id)
@@ -220,7 +219,7 @@ async def help_cmd(msg: Message):
         "🏷 НИКИ:\n/snick @user [ник]\n/rnick\n/nlist\n/clearnicks\n\n"
         "⚠️ МОДЕРАЦИЯ:\n/warn [пользователь] [причина]\n/mute [пользователь] [время] [причина]\n/unmute [пользователь]\n/ban [пользователь] [время] [причина]\n/unban [пользователь]\n/kick [пользователь]\n\n"
         "🎖️ РОЛИ:\n/giverole [пользователь] [приоритет]\n/removerole [пользователь]\n/delrole [приоритет]\n/addrole [приоритет] [имя]\n/roles\n/staff\n\n"
-        "📊 /stats\n⚙️ /setcmd\n👑 /sysrole\n\n🛡 Обычные пользователи не могут приглашать\n💡 Можно отвечать на сообщение командой"
+        "📊 /stats\n⚙️ /setcmd\n👑 /sysrole\n\n🛡 Обычные пользователи не могут приглашать\n🚪 При выходе роль снимается автоматически\n💡 Можно отвечать на сообщение командой"
     )
 
 # =========================
@@ -585,33 +584,28 @@ async def kick_cmd(msg: Message, target: str):
     finally: conn.close()
 
 # =========================
-# SNICK с иерархией
+# SNICK
 # =========================
 @bot.on.message(text="/snick")
 async def snick_help(msg: Message):
-    return await msg.answer("🏷 /snick @user [ник]\nИли ответом: /snick [ник]\nМакс. 50 символов\n⚠️ Нельзя менять ник равному или высшему")
+    return await msg.answer("🏷 /snick @user [ник]\nИли ответом: /snick [ник]\nМакс. 50 символов")
 
 @bot.on.message(text="/snick <target> <nick>")
 async def snick_cmd(msg: Message, target: str, nick: str):
     if len(nick) > 50: return await msg.answer("❌ Макс. 50 символов")
-    
     uid = get_target_id(msg)
     if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
     if not uid: return await msg.answer("❌ Пользователь не найден")
-    
     conn, cur = db()
     try:
         has_perm, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'snick')
         if not has_perm: return await msg.answer(f"❌ Требуется роль {req}+")
-        
         if uid == msg.from_id:
             cur.execute("INSERT INTO users (user_id, peer_id, nickname) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET nickname=%s", (uid, msg.peer_id, nick, nick))
             return await msg.answer(f"🏷 НИК УСТАНОВЛЕН\n🏷 {nick}")
-        
         if not can_punish_user(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             target_role = get_user_role(cur, msg.peer_id, uid)
             return await msg.answer(f"❌ НЕЛЬЗЯ УСТАНОВИТЬ НИК\n📊 Ваш приоритет: {user_role}\n📊 Приоритет цели: {target_role}")
-        
         cur.execute("INSERT INTO users (user_id, peer_id, nickname) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET nickname=%s", (uid, msg.peer_id, nick, nick))
         user_name = await get_user_name(uid)
         await msg.answer(f"🏷 НИК УСТАНОВЛЕН\n👤 {user_name}\n🏷 {nick}")
@@ -637,13 +631,12 @@ async def nlist(msg: Message):
     try:
         cur.execute("SELECT user_id, nickname FROM users WHERE peer_id=%s AND nickname IS NOT NULL ORDER BY nickname", (msg.peer_id,))
         nicks = cur.fetchall()
-        if not nicks: return await msg.answer("🏷 НИКИ\n\n❌ Нет установленных ников\n/snick @user [ник]")
-        text = f"🏷 НИКИ БЕСЕДЫ ({len(nicks)})\n\n"
-        for user_id, nickname in nicks:
-            try: user_name = await get_user_name(user_id)
-            except: user_name = f"Пользователь {user_id}"
-            text += f"👤 @id{user_id} ({user_name}) - {nickname}\n"
-        
+        if not nicks: return await msg.answer("🏷 Нет ников\n/snick @user [ник]")
+        text = f"🏷 НИКИ ({len(nicks)})\n\n"
+        for uid, nick in nicks:
+            try: name = await get_user_name(uid)
+            except: name = f"ID {uid}"
+            text += f"👤 @id{uid} ({name}) - {nick}\n"
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
                 await msg.answer(text[i:i+4000])
@@ -664,15 +657,14 @@ async def clearnicks(msg: Message):
             members = await bot.api.messages.get_conversation_members(peer_id=msg.peer_id)
             member_ids = [m.member_id for m in members.items]
         except:
-            return await msg.answer("❌ Не удалось получить список участников")
+            return await msg.answer("❌ Не удалось получить список")
         cur.execute("SELECT user_id FROM users WHERE peer_id=%s AND nickname IS NOT NULL", (msg.peer_id,))
-        nicks = cur.fetchall()
         removed = 0
-        for (user_id,) in nicks:
-            if user_id not in member_ids:
-                cur.execute("UPDATE users SET nickname=NULL WHERE user_id=%s AND peer_id=%s", (user_id, msg.peer_id))
+        for (uid,) in cur.fetchall():
+            if uid not in member_ids:
+                cur.execute("UPDATE users SET nickname=NULL WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
                 removed += 1
-        await msg.answer(f"🧹 ОЧИСТКА НИКОВ\n✅ Удалено: {removed}")
+        await msg.answer(f"🧹 Удалено ников: {removed}")
     finally: conn.close()
 
 # =========================
@@ -693,9 +685,9 @@ async def stats_cmd(msg: Message, target: str = ""):
         res = cur.fetchone()
         if not res: return await msg.answer("❌ Нет данных")
         role, msgs, warns, nick = res
-        user_name = await get_user_name(uid)
-        status = "🚫 ЗАБАНЕН" if is_user_banned(msg.peer_id, uid) else "🔇 ЗАМУЧЕН" if is_user_muted(msg.peer_id, uid) else "✅ Активен"
-        text = f"📊 СТАТИСТИКА\n👤 {user_name}\n📊 {status}\n🎖️ Роль: {role}\n💬 Сообщений: {msgs}\n⚠️ Предупреждений: {warns}/3"
+        name = await get_user_name(uid)
+        status = "🚫 БАН" if is_user_banned(msg.peer_id, uid) else "🔇 МУТ" if is_user_muted(msg.peer_id, uid) else "✅ Ок"
+        text = f"📊 {name}\n📊 {status}\n🎖️ Роль: {role}\n💬 Сообщений: {msgs}\n⚠️ Варнов: {warns}/3"
         if nick: text += f"\n🏷 Ник: {nick}"
         await msg.answer(text)
     finally: conn.close()
@@ -710,23 +702,37 @@ async def handler(msg: Message):
         if not msg.text: return
         uid, pid = msg.from_id, msg.peer_id
         
+        # Авто-кик при выходе + снятие роли
+        if msg.action and msg.action.type == 'chat_kick_user':
+            if msg.action.member_id == uid:
+                # Снимаем роль перед киком
+                cur.execute("UPDATE users SET role=0, nickname=NULL WHERE user_id=%s AND peer_id=%s", (uid, pid))
+                await kick_user(pid, uid)
+                name = await get_user_name(uid)
+                await msg.answer(f"👢 @id{uid} ({name}) вышел из чата\n📊 Роль сброшена\n\n⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+                return
+        
+        # Авто-кик забаненных
         if is_user_banned(pid, uid):
             await kick_user(pid, uid)
             return
         
+        # Авто-удаление сообщений замученных
         if is_user_muted(pid, uid):
             if hasattr(msg, 'conversation_message_id'):
                 await delete_message(pid, msg.conversation_message_id)
             return
         
+        # Защита от приглашений обычными пользователями
         if msg.action and msg.action.type == 'chat_invite_user':
             inviter_role = get_user_role(cur, pid, uid)
             if inviter_role <= 0 and uid != OWNER_ID:
                 invited_uid = msg.action.member_id
                 await kick_user(pid, invited_uid)
-                await msg.answer(f"🛡 ЗАЩИТА\nОбычные пользователи не могут приглашать\nПриглашённый исключён")
+                await msg.answer("🛡 Обычные пользователи не могут приглашать\nПриглашённый исключён")
                 return
         
+        # Обновление статистики
         cur.execute("INSERT INTO users (user_id, peer_id, msgs) VALUES (%s,%s,1) ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs=users.msgs+1", (uid, pid))
     except Exception as e:
         logger.error(f"ERROR in handler: {e}")
