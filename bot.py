@@ -39,41 +39,64 @@ def init():
     try:
         conn, cur = db()
         try:
+            cur.execute("DROP TABLE IF EXISTS roles CASCADE")
+            cur.execute("DROP TABLE IF EXISTS cmd_permissions CASCADE")
+            cur.execute("DROP TABLE IF EXISTS punishments CASCADE")
+            cur.execute("DROP TABLE IF EXISTS users CASCADE")
+            
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS users(
-                user_id BIGINT, peer_id BIGINT, role INT DEFAULT 0,
-                msgs INT DEFAULT 0, nickname TEXT,
-                warn_count INT DEFAULT 0, warn_reasons TEXT DEFAULT '',
+            CREATE TABLE users(
+                user_id BIGINT,
+                peer_id BIGINT,
+                role INT DEFAULT 0,
+                msgs INT DEFAULT 0,
+                nickname TEXT,
+                warn_count INT DEFAULT 0,
+                warn_reasons TEXT DEFAULT '',
                 PRIMARY KEY (user_id, peer_id)
-            );""")
-            
+            );
+            """)
+
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS punishments(
-                id SERIAL PRIMARY KEY, user_id BIGINT, peer_id BIGINT,
-                type TEXT, end_at TIMESTAMP, reason TEXT,
+            CREATE TABLE punishments(
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                peer_id BIGINT,
+                type TEXT,
+                end_at TIMESTAMP,
+                reason TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
-            );""")
-            
+            );
+            """)
+
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS roles(
-                id SERIAL PRIMARY KEY, peer_id BIGINT,
-                role_priority INT, role_name TEXT,
+            CREATE TABLE roles(
+                id SERIAL PRIMARY KEY,
+                peer_id BIGINT,
+                role_priority INT,
+                role_name TEXT,
                 created_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(peer_id, role_priority)
-            );""")
-            
+            );
+            """)
+
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS cmd_permissions(
-                id SERIAL PRIMARY KEY, peer_id BIGINT, cmd_name TEXT,
-                required_role INT DEFAULT 10, created_at TIMESTAMP DEFAULT NOW(),
+            CREATE TABLE cmd_permissions(
+                id SERIAL PRIMARY KEY,
+                peer_id BIGINT,
+                cmd_name TEXT,
+                required_role INT DEFAULT 10,
+                created_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(peer_id, cmd_name)
-            );""")
+            );
+            """)
 
             default_permissions = [
                 ('warn', 10), ('mute', 10), ('unmute', 10),
                 ('ban', 50), ('unban', 50), ('kick', 10),
                 ('snick', 0), ('rnick', 0), ('giverole', 60),
-                ('stats', 0), ('addrole', 50)
+                ('stats', 0), ('addrole', 50), ('removerole', 60),
+                ('nlist', 0), ('clearnicks', 60)
             ]
             
             for cmd, role in default_permissions:
@@ -111,9 +134,7 @@ def format_time(td):
     return " ".join(parts) if parts else "менее минуты"
 
 def get_target_id(msg: Message):
-    """Получает ID цели: сначала reply, потом упоминание в тексте"""
-    if msg.reply_message:
-        return msg.reply_message.from_id
+    if msg.reply_message: return msg.reply_message.from_id
     if msg.text:
         r = re.search(r"\[id(\d+)\|", msg.text)
         if r: return int(r.group(1))
@@ -189,11 +210,12 @@ async def delete_message(peer_id, cmid):
 async def help_cmd(msg: Message):
     return await msg.answer(
         "💠 FLEX BOT - ПОЛНОЕ РУКОВОДСТВО\n\n"
-        "🏷 НИКИ:\n/snick [ник]\n/rnick\n\n"
+        "🏷 НИКИ:\n/snick [ник]\n/rnick\n/nlist - список ников\n/clearnicks - удалить ники вышедших\n\n"
         "⚠️ МОДЕРАЦИЯ:\n/warn [пользователь] [причина]\n/mute [пользователь] [время] [причина]\n/unmute [пользователь]\n/ban [пользователь] [время] [причина]\n/unban [пользователь]\n/kick [пользователь]\n\n"
-        "🎖️ РОЛИ:\n/giverole [пользователь] [приоритет]\n/addrole [приоритет] [имя]\n/roles\n/staff\n\n"
+        "🎖️ РОЛИ:\n/giverole [пользователь] [приоритет]\n/removerole [пользователь] - снять роль\n/addrole [приоритет] [имя]\n/roles\n/staff\n\n"
         "📊 /stats [пользователь]\n⚙️ /setcmd\n👑 /sysrole [пользователь] [приоритет]\n\n"
-        "💡 Можно отвечать на сообщение командой\nПример: ответить на сообщение и написать /mute 30m спам"
+        "🛡 ЗАЩИТА: Обычные пользователи (роль 0) не могут приглашать\n"
+        "💡 Можно отвечать на сообщение командой"
     )
 
 # =========================
@@ -214,7 +236,7 @@ async def start(msg: Message):
                 cur.execute("INSERT INTO cmd_permissions (peer_id, cmd_name, required_role) SELECT %s, cmd_name, required_role FROM cmd_permissions WHERE peer_id=0 ON CONFLICT DO NOTHING", (msg.peer_id,))
                 owner_name = await get_user_name(m.member_id)
                 return await msg.answer(f"✅ БОТ АКТИВИРОВАН\n👑 @id{m.member_id} ({owner_name}) получил роль 100\n/help - список команд")
-        return await msg.answer("❌ Не удалось найти создателя")
+        return await msg.answer("❌ Не удалось найти создателя беседы")
     finally: conn.close()
 
 # =========================
@@ -258,9 +280,7 @@ async def sysrole_cmd(msg: Message, target: str, priority: str):
     if msg.from_id != OWNER_ID: return await msg.answer("❌ Только для владельца бота")
     
     uid = get_target_id(msg)
-    if not uid:
-        uid = await resolve_user_id(target.replace("@", "").strip())
-    
+    if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
     if not uid: return await msg.answer("❌ Пользователь не найден")
     
     try: priority_int = int(priority)
@@ -308,9 +328,7 @@ async def giverole_cmd(msg: Message, target: str, priority: str):
         if not has_perm: return await msg.answer(f"❌ Требуется роль {req}+")
         
         uid = get_target_id(msg)
-        if not uid:
-            uid = await resolve_user_id(target.replace("@", "").strip())
-        
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
         
         try: p = int(priority)
@@ -321,6 +339,33 @@ async def giverole_cmd(msg: Message, target: str, priority: str):
         cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (uid, msg.peer_id, p, p))
         user_name = await get_user_name(uid)
         await msg.answer(f"🎖️ РОЛЬ ВЫДАНА\n👤 {user_name}\n📊 Приоритет: {p}")
+    finally: conn.close()
+
+# =========================
+# REMOVEROLE
+# =========================
+@bot.on.message(text="/removerole")
+async def removerole_help(msg: Message):
+    return await msg.answer("🗑 /removerole @user - снять роль\nИли ответом: /removerole")
+
+@bot.on.message(text="/removerole <target>")
+async def removerole_cmd(msg: Message, target: str):
+    conn, cur = db()
+    try:
+        has_perm, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'removerole')
+        if not has_perm: return await msg.answer(f"❌ Требуется роль {req}+")
+        
+        uid = get_target_id(msg)
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
+        if not uid: return await msg.answer("❌ Пользователь не найден")
+        
+        target_role = get_user_role(cur, msg.peer_id, uid)
+        if target_role >= user_role and msg.from_id != OWNER_ID:
+            return await msg.answer("❌ Нельзя снять роль у пользователя с равным или высшим приоритетом")
+        
+        cur.execute("UPDATE users SET role=0 WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
+        user_name = await get_user_name(uid)
+        await msg.answer(f"🗑 РОЛЬ СНЯТА\n👤 {user_name}\n📊 Приоритет сброшен до 0")
     finally: conn.close()
 
 # =========================
@@ -345,7 +390,7 @@ async def list_roles(msg: Message):
 async def staff(msg: Message):
     conn, cur = db()
     try:
-        cur.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role>0 ORDER BY role DESC LIMIT 30", (msg.peer_id,))
+        cur.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role>0 ORDER BY role DESC LIMIT 50", (msg.peer_id,))
         staff = cur.fetchall()
         if not staff: return await msg.answer("👥 Нет пользователей с ролями")
         text = "👥 ПЕРСОНАЛ:\n\n"
@@ -353,7 +398,7 @@ async def staff(msg: Message):
             try: name = await get_user_name(uid)
             except: name = f"ID {uid}"
             status = "🚫" if is_user_banned(msg.peer_id, uid) else "🔇" if is_user_muted(msg.peer_id, uid) else "✅"
-            text += f"{status} {name} (роль: {role})\n"
+            text += f"{status} @id{uid} ({name}) - роль {role}\n"
         await msg.answer(text)
     finally: conn.close()
 
@@ -372,9 +417,7 @@ async def warn_cmd(msg: Message, target: str, reason: str = "Без причин
         if not has_perm: return await msg.answer(f"❌ Требуется роль {req}+")
         
         uid = get_target_id(msg)
-        if not uid:
-            uid = await resolve_user_id(target.replace("@", "").strip())
-        
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
         
         cur.execute("INSERT INTO users (user_id, peer_id, warn_count, warn_reasons) VALUES (%s,%s,1,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET warn_count=users.warn_count+1, warn_reasons=CASE WHEN users.warn_reasons='' THEN EXCLUDED.warn_reasons ELSE users.warn_reasons||' | '||EXCLUDED.warn_reasons END", (uid, msg.peer_id, reason))
@@ -412,9 +455,7 @@ async def process_mute_cmd(msg: Message, target: str, time_str: str, reason: str
         if not has_perm: return await msg.answer(f"❌ Требуется роль {req}+")
         
         uid = get_target_id(msg)
-        if not uid:
-            uid = await resolve_user_id(target.replace("@", "").strip())
-        
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
         
         duration = None
@@ -443,8 +484,7 @@ async def unmute_cmd(msg: Message, target: str):
     conn, cur = db()
     try:
         uid = get_target_id(msg)
-        if not uid:
-            uid = await resolve_user_id(target.replace("@", "").strip())
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
         cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, msg.peer_id))
         await msg.answer("🔊 Мут снят")
@@ -472,9 +512,7 @@ async def process_ban_cmd(msg: Message, target: str, time_str: str, reason: str)
         if not has_perm: return await msg.answer(f"❌ Требуется роль {req}+")
         
         uid = get_target_id(msg)
-        if not uid:
-            uid = await resolve_user_id(target.replace("@", "").strip())
-        
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
         
         duration = None
@@ -505,8 +543,7 @@ async def unban_cmd(msg: Message, target: str):
     conn, cur = db()
     try:
         uid = get_target_id(msg)
-        if not uid:
-            uid = await resolve_user_id(target.replace("@", "").strip())
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
         cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban'", (uid, msg.peer_id))
         await msg.answer("✅ Бан снят")
@@ -527,8 +564,7 @@ async def kick_cmd(msg: Message, target: str):
         if not has_perm: return await msg.answer(f"❌ Требуется роль {req}+")
         
         uid = get_target_id(msg)
-        if not uid:
-            uid = await resolve_user_id(target.replace("@", "").strip())
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
         
         await kick_user(msg.peer_id, uid)
@@ -563,6 +599,90 @@ async def rnick(msg: Message):
     finally: conn.close()
 
 # =========================
+# NLIST - список ников
+# =========================
+@bot.on.message(text="/nlist")
+async def nlist(msg: Message):
+    conn, cur = db()
+    try:
+        cur.execute("SELECT user_id, nickname FROM users WHERE peer_id=%s AND nickname IS NOT NULL ORDER BY nickname", (msg.peer_id,))
+        nicks = cur.fetchall()
+        
+        if not nicks:
+            return await msg.answer("🏷 НИКИ\n\n❌ В беседе нет установленных ников\n\nУстановите ник: /snick [ваш ник]")
+        
+        text = f"🏷 НИКИ БЕСЕДЫ (всего: {len(nicks)})\n\n"
+        
+        for user_id, nickname in nicks:
+            try:
+                user_name = await get_user_name(user_id)
+            except:
+                user_name = f"Пользователь {user_id}"
+            
+            text += f"👤 @id{user_id} ({user_name})\n   🏷 {nickname}\n\n"
+        
+        # Разбиваем на части, если слишком длинное
+        if len(text) > 4000:
+            parts = []
+            current_part = f"🏷 НИКИ БЕСЕДЫ (часть 1)\n\n"
+            
+            for user_id, nickname in nicks:
+                try:
+                    user_name = await get_user_name(user_id)
+                except:
+                    user_name = f"Пользователь {user_id}"
+                
+                line = f"👤 @id{user_id} ({user_name}) - {nickname}\n"
+                
+                if len(current_part) + len(line) > 4000:
+                    parts.append(current_part)
+                    current_part = f"🏷 НИКИ БЕСЕДЫ (часть {len(parts)+1})\n\n"
+                
+                current_part += line
+            
+            if current_part:
+                parts.append(current_part)
+            
+            for part in parts:
+                await msg.answer(part)
+        else:
+            await msg.answer(text)
+    
+    finally: conn.close()
+
+# =========================
+# CLEARNICKS - удалить ники вышедших
+# =========================
+@bot.on.message(text="/clearnicks")
+async def clearnicks(msg: Message):
+    conn, cur = db()
+    try:
+        has_perm, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'clearnicks')
+        if not has_perm: return await msg.answer(f"❌ Требуется роль {req}+")
+        
+        # Получаем список действующих участников беседы
+        try:
+            members = await bot.api.messages.get_conversation_members(peer_id=msg.peer_id)
+            member_ids = [m.member_id for m in members.items]
+        except:
+            return await msg.answer("❌ Не удалось получить список участников")
+        
+        # Получаем всех у кого есть ники
+        cur.execute("SELECT user_id, nickname FROM users WHERE peer_id=%s AND nickname IS NOT NULL", (msg.peer_id,))
+        nicks = cur.fetchall()
+        
+        removed = 0
+        for user_id, nickname in nicks:
+            if user_id not in member_ids:
+                cur.execute("UPDATE users SET nickname=NULL WHERE user_id=%s AND peer_id=%s", (user_id, msg.peer_id))
+                removed += 1
+                logger.info(f"Removed nick from left user {user_id}: {nickname}")
+        
+        await msg.answer(f"🧹 ОЧИСТКА НИКОВ\n\n✅ Удалено ников: {removed}\n👥 Проверено пользователей: {len(nicks)}")
+    
+    finally: conn.close()
+
+# =========================
 # STATS
 # =========================
 @bot.on.message(text="/stats")
@@ -572,8 +692,7 @@ async def stats_help(msg: Message):
 @bot.on.message(text="/stats <target>")
 async def stats_cmd(msg: Message, target: str = ""):
     uid = get_target_id(msg)
-    if not uid and target:
-        uid = await resolve_user_id(target.replace("@", "").strip())
+    if not uid and target: uid = await resolve_user_id(target.replace("@", "").strip())
     if not uid: uid = msg.from_id
     
     conn, cur = db()
@@ -590,7 +709,7 @@ async def stats_cmd(msg: Message, target: str = ""):
     finally: conn.close()
 
 # =========================
-# MAIN HANDLER
+# MAIN HANDLER + PROTECTION
 # =========================
 @bot.on.message()
 async def handler(msg: Message):
@@ -599,15 +718,34 @@ async def handler(msg: Message):
         if not msg.text: return
         uid, pid = msg.from_id, msg.peer_id
         
+        # Авто-кик забаненных
         if is_user_banned(pid, uid):
             await kick_user(pid, uid)
             return
         
+        # Авто-удаление сообщений замученных
         if is_user_muted(pid, uid):
             if hasattr(msg, 'conversation_message_id'):
                 await delete_message(pid, msg.conversation_message_id)
             return
         
+        # Проверка на приглашение от обычных пользователей
+        if msg.action and msg.action.type == 'chat_invite_user':
+            inviter_role = get_user_role(cur, pid, uid)
+            if inviter_role <= 0 and uid != OWNER_ID:
+                invited_uid = msg.action.member_id
+                await kick_user(pid, invited_uid)
+                inviter_name = await get_user_name(uid)
+                await msg.answer(
+                    f"🛡 ЗАЩИТА ОТ ПРИГЛАШЕНИЙ\n\n"
+                    f"👤 @id{uid} ({inviter_name})\n"
+                    f"📊 Ваша роль: {inviter_role}\n"
+                    f"❌ Обычные пользователи не могут приглашать\n"
+                    f"👢 Приглашённый исключён"
+                )
+                return
+        
+        # Обновление статистики
         cur.execute("INSERT INTO users (user_id, peer_id, msgs) VALUES (%s,%s,1) ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs=users.msgs+1", (uid, pid))
     except Exception as e:
         logger.error(f"ERROR in handler: {e}")
