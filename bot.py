@@ -96,7 +96,8 @@ def init():
                 ('ban', 50), ('unban', 50), ('kick', 10),
                 ('snick', 10), ('rnick', 10), ('giverole', 60),
                 ('stats', 0), ('addrole', 50), ('removerole', 60),
-                ('delrole', 60), ('nlist', 0), ('clearnicks', 60)
+                ('delrole', 60), ('nlist', 0), ('clearnicks', 60),
+                ('zov', 0)
             ]
             
             for cmd, role in default_permissions:
@@ -178,26 +179,22 @@ def get_user_role(cur, peer_id, user_id):
     return res[0] if res else 0
 
 def get_cmd_required_role(cur, peer_id, cmd_name):
-    # Сначала ищем настройку для конкретной беседы
     cur.execute("SELECT required_role FROM cmd_permissions WHERE peer_id=%s AND cmd_name=%s", (peer_id, cmd_name))
     res = cur.fetchone()
     if res: return res[0]
-    # Если нет - ищем глобальную
     cur.execute("SELECT required_role FROM cmd_permissions WHERE peer_id=0 AND cmd_name=%s", (cmd_name,))
     res = cur.fetchone()
     return res[0] if res else 0
 
 def check_permission(cur, peer_id, user_id, cmd_name):
-    """Проверяет права на команду. Возвращает (разрешено, роль_юзер, требуемая_роль)"""
     if user_id == OWNER_ID: return True, 0, 0
     user_role = get_user_role(cur, peer_id, user_id)
     required_role = get_cmd_required_role(cur, peer_id, cmd_name)
     return user_role >= required_role, user_role, required_role
 
 def can_punish(cur, peer_id, punisher_id, target_id):
-    """Проверяет иерархию: punisher должен быть СТРОГО ВЫШЕ target"""
     if punisher_id == OWNER_ID: return True
-    if punisher_id == target_id: return True  # Себя можно
+    if punisher_id == target_id: return True
     punisher_role = get_user_role(cur, peer_id, punisher_id)
     target_role = get_user_role(cur, peer_id, target_id)
     return punisher_role > target_role
@@ -214,6 +211,13 @@ async def delete_message(peer_id, cmid):
         return True
     except: return False
 
+async def get_bot_id():
+    try:
+        data = await bot.api.groups.get_by_id()
+        return data[0].id
+    except:
+        return None
+
 # =========================
 # HELP
 # =========================
@@ -224,6 +228,7 @@ async def help_cmd(msg: Message):
         "🏷 /snick /rnick /nlist /clearnicks\n"
         "⚠️ /warn /mute /unmute /ban /unban /kick\n"
         "🎖️ /giverole /removerole /delrole /addrole /roles /staff\n"
+        "📢 /zov [причина] - позвать всех\n"
         "📊 /stats\n⚙️ /setcmd\n👑 /sysrole\n\n"
         "🛡 Иерархия: нельзя трогать равных и высших\n"
         "💡 Все команды настраиваются через /setcmd"
@@ -273,18 +278,11 @@ async def setcmd_help(msg: Message):
 async def setcmd(msg: Message, cmd_name: str, priority: str):
     conn, cur = db()
     try:
-        if cmd_name.lower() == "sysrole":
-            return await msg.answer("❌ Нельзя изменить /sysrole")
+        if cmd_name.lower() == "sysrole": return await msg.answer("❌ Нельзя изменить /sysrole")
+        try: p = int(priority)
+        except: return await msg.answer("❌ Приоритет - число")
+        if p < 0 or p > 1000: return await msg.answer("❌ Приоритет от 0 до 1000")
         
-        try:
-            p = int(priority)
-        except:
-            return await msg.answer("❌ Приоритет должен быть числом")
-        
-        if p < 0 or p > 1000:
-            return await msg.answer("❌ Приоритет от 0 до 1000")
-        
-        # Вставляем или обновляем настройку для беседы
         cur.execute("""
         INSERT INTO cmd_permissions (peer_id, cmd_name, required_role)
         VALUES (%s, %s, %s)
@@ -293,11 +291,77 @@ async def setcmd(msg: Message, cmd_name: str, priority: str):
         """, (msg.peer_id, cmd_name.lower(), p, p))
         
         await msg.answer(f"✅ /{cmd_name.lower()} - роль {p}+")
-    
-    except Exception as e:
-        logger.error(f"ERROR in setcmd: {e}")
-        return await msg.answer("❌ Ошибка при настройке прав")
     finally: conn.close()
+
+# =========================
+# ZOV - позвать всех
+# =========================
+@bot.on.message(text="/zov")
+async def zov_help(msg: Message):
+    return await msg.answer(
+        "📢 КОМАНДА: ЗОВ ВСЕХ\n\n"
+        "📝 Синтаксис:\n/zov [причина]\n\n"
+        "⚙️ Примеры:\n"
+        "• /zov ВСЕ В ИГРУ!\n"
+        "• /zov СРОЧНЫЙ СБОР!\n"
+        "• /zov Общее собрание\n\n"
+        "📋 Описание:\nПингует всех участников беседы (кроме ботов)\n"
+        "с указанием причины и кто позвал"
+    )
+
+@bot.on.message(text="/zov <reason>")
+async def zov_cmd(msg: Message, reason: str = "Без причины"):
+    conn, cur = db()
+    try:
+        ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'zov')
+        if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
+        
+        # Получаем список участников
+        try:
+            members = await bot.api.messages.get_conversation_members(peer_id=msg.peer_id)
+        except:
+            return await msg.answer("❌ Не удалось получить список участников")
+        
+        # Получаем ID бота
+        bot_id = await get_bot_id()
+        
+        # Формируем список упоминаний (кроме ботов)
+        mentions = []
+        for m in members.items:
+            member_id = m.member_id
+            # Пропускаем ботов (обычно ID сообществ начинается с -)
+            if member_id < 0:
+                continue
+            # Пропускаем нашего бота
+            if bot_id and member_id == bot_id:
+                continue
+            mentions.append(f"@id{member_id}")
+        
+        if not mentions:
+            return await msg.answer("❌ Некого звать")
+        
+        # Получаем имя позвавшего
+        caller_name = await get_user_name(msg.from_id)
+        
+        # Разбиваем на части если слишком много (VK ограничение на упоминания)
+        max_per_msg = 50
+        
+        if len(mentions) <= max_per_msg:
+            text = f"🔊 {caller_name} зовёт всех!\n\n📢 {reason}\n\n"
+            text += " ".join(mentions)
+            await msg.answer(text)
+        else:
+            # Отправляем первое сообщение с причиной
+            text = f"🔊 {caller_name} зовёт всех!\n\n📢 {reason}\n\n"
+            await msg.answer(text)
+            
+            # Отправляем упоминания частями
+            for i in range(0, len(mentions), max_per_msg):
+                chunk = mentions[i:i+max_per_msg]
+                await msg.answer(" ".join(chunk))
+    
+    finally:
+        conn.close()
 
 # =========================
 # SYSRole
@@ -756,7 +820,6 @@ async def handler(msg: Message):
         if not msg.text: return
         uid, pid = msg.from_id, msg.peer_id
         
-        # Авто-кик при выходе + снятие роли
         if msg.action and msg.action.type == 'chat_kick_user':
             if msg.action.member_id == uid:
                 cur.execute("UPDATE users SET role=0, nickname=NULL WHERE user_id=%s AND peer_id=%s", (uid, pid))
@@ -765,18 +828,15 @@ async def handler(msg: Message):
                 await msg.answer(f"👢 @id{uid} ({name}) вышел из чата\n📊 Роль сброшена\n\n⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}")
                 return
         
-        # Авто-кик забаненных
         if is_user_banned(pid, uid):
             await kick_user(pid, uid)
             return
         
-        # Авто-удаление сообщений замученных
         if is_user_muted(pid, uid):
             if hasattr(msg, 'conversation_message_id'):
                 await delete_message(pid, msg.conversation_message_id)
             return
         
-        # Защита от приглашений обычными пользователями
         if msg.action and msg.action.type == 'chat_invite_user':
             inviter_role = get_user_role(cur, pid, uid)
             if inviter_role <= 0 and uid != OWNER_ID:
@@ -785,7 +845,6 @@ async def handler(msg: Message):
                 await msg.answer("🛡 Обычные пользователи не могут приглашать\nПриглашённый исключён")
                 return
         
-        # Обновление статистики
         cur.execute("INSERT INTO users (user_id, peer_id, msgs) VALUES (%s,%s,1) ON CONFLICT (user_id, peer_id) DO UPDATE SET msgs=users.msgs+1", (uid, pid))
     except Exception as e:
         logger.error(f"ERROR in handler: {e}")
