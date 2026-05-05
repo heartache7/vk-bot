@@ -576,16 +576,41 @@ async def kick_cmd(msg: Message, target: str):
 # =========================
 @bot.on.message(text="/snick")
 async def snick_help(msg: Message):
-    return await msg.answer("🏷 /snick [ник]\nМакс. 50 символов")
+    return await msg.answer(
+        "🏷 КОМАНДА: УСТАНОВКА НИКА\n\n"
+        "📝 Синтаксис:\n"
+        "/snick @пользователь [ник]\n"
+        "Или ответьте на сообщение: /snick [ник]\n\n"
+        "⚙️ Примеры:\n"
+        "• /snick @Ivan Король\n"
+        "• /snick @Maria Принцесса\n"
+        "• (ответить на сообщение) /snick Легенда\n\n"
+        "📋 Максимальная длина ника - 50 символов"
+    )
 
-@bot.on.message(text="/snick <nick>")
-async def snick(msg: Message, nick: str):
-    if len(nick) > 50: return await msg.answer("❌ Макс. 50 символов")
+@bot.on.message(text="/snick <target> <nick>")
+async def snick_cmd(msg: Message, target: str, nick: str):
+    """Установка ника другому пользователю"""
+    if len(nick) > 50:
+        return await msg.answer("❌ Ник слишком длинный (макс. 50 символов)")
+    
+    uid = get_target_id(msg)
+    if not uid:
+        uid = await resolve_user_id(target.replace("@", "").strip())
+    
+    if not uid:
+        return await msg.answer("❌ Пользователь не найден")
+    
     conn, cur = db()
     try:
-        cur.execute("INSERT INTO users (user_id, peer_id, nickname) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET nickname=%s", (msg.from_id, msg.peer_id, nick, nick))
-        await msg.answer(f"✅ Ник: {nick}")
-    finally: conn.close()
+        cur.execute(
+            "INSERT INTO users (user_id, peer_id, nickname) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET nickname=%s",
+            (uid, msg.peer_id, nick, nick)
+        )
+        user_name = await get_user_name(uid)
+        await msg.answer(f"🏷 НИК УСТАНОВЛЕН\n👤 {user_name} (id{uid})\n🏷 {nick}")
+    finally:
+        conn.close()
 
 # =========================
 # RNICK
