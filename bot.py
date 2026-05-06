@@ -834,10 +834,10 @@ async def staff(msg: Message):
     conn, cur = db()
     try:
         cur.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role>0 ORDER BY role DESC LIMIT 50", (msg.peer_id,))
-        staff = cur.fetchall()
-        if not staff: return await msg.answer("👥 Нет персонала")
+        staff_list = cur.fetchall()
+        if not staff_list: return await msg.answer("👥 Нет персонала")
         text = "👥 ПЕРСОНАЛ:\n\n"
-        for uid, role in staff:
+        for uid, role in staff_list:
             try: name = await get_user_name(uid)
             except: name = f"ID {uid}"
             s = "🚫" if is_user_banned(msg.peer_id, uid) else "🔇" if is_user_muted(msg.peer_id, uid) else "✅"
