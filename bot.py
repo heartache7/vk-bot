@@ -96,7 +96,7 @@ def init():
                 ('snick', 10), ('rnick', 10), ('giverole', 60),
                 ('stats', 0), ('addrole', 100), ('removerole', 60),
                 ('delrole', 100), ('nlist', 0), ('clearnicks', 60),
-                ('zov', 50), ('setcmd', 100),
+                ('zov', 50), ('setcmd', 100), ('gsetcmd', 100),
                 ('creategroup', 100), ('setgroup', 100), ('leavegroup', 100),
                 ('gban', 60), ('gkick', 60), ('ggiverole', 60), ('gzov', 60),
                 ('gremoverole', 60), ('gsnick', 60), ('grnick', 60),
@@ -273,10 +273,11 @@ async def get_chat_members_mentions(peer_id):
     except: return []
 
 # =========================
-# HELP
+# HELP (для бесед)
 # =========================
 @bot.on.message(text="/help")
 async def help_cmd(msg: Message):
+    if msg.peer_id < 2000000000: return  # Игнорируем ЛС для этой команды
     return await msg.answer(
         "💠 FLEX BOT\n\n"
         "🏷 /snick /rnick /gnick /nlist /clearnicks\n"
@@ -285,15 +286,133 @@ async def help_cmd(msg: Message):
         "📢 /zov\n"
         "🌐 ОБЪЕДИНЕНИЯ:\n"
         "/creategroup /setgroup /leavegroup /groups\n"
-        "/gban /gkick /ggiverole /gremoverole /gzov /gsnick /grnick\n"
-        "📊 /stats\n⚙️ /setcmd\n👑 /sysrole"
+        "/gban /gkick /ggiverole /gremoverole /gzov /gsnick /grnick /gsetcmd\n"
+        "📊 /stats\n⚙️ /setcmd /gsetcmd\n👑 /sysrole"
     )
 
 # =========================
-# START
+# ADMIN PANEL (ЛС, только владелец)
+# =========================
+@bot.on.message(text="/admin")
+async def admin_panel(msg: Message):
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
+        return
+    
+    conn, cur = db()
+    try:
+        cur.execute("SELECT COUNT(DISTINCT peer_id) FROM users")
+        total_chats = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM users")
+        total_users = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM punishments WHERE type='ban' AND (end_at IS NULL OR end_at > NOW())")
+        active_bans = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM groups")
+        total_groups = cur.fetchone()[0]
+        
+        await msg.answer(
+            f"👑 АДМИН-ПАНЕЛЬ FLEX BOT\n\n"
+            f"📊 Статистика:\n"
+            f"💬 Бесед: {total_chats}\n"
+            f"👥 Пользователей: {total_users}\n"
+            f"🚫 Активных банов: {active_bans}\n"
+            f"🌐 Объединений: {total_groups}\n\n"
+            f"📋 Команды админ-панели:\n"
+            f"/globalban [id] [время] [причина] - бан везде\n"
+            f"/globalunban [id] - разбан везде\n"
+            f"/broadcast [текст] - рассылка\n"
+            f"/adminchats - список бесед\n"
+            f"/admin - эта панель"
+        )
+    finally: conn.close()
+
+@bot.on.message(text="/adminchats")
+async def admin_chats(msg: Message):
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
+        return
+    
+    conn, cur = db()
+    try:
+        cur.execute("SELECT DISTINCT peer_id FROM users ORDER BY peer_id")
+        chats = cur.fetchall()
+        text = "📋 БЕСЕДЫ БОТА:\n\n"
+        for i, (peer_id,) in enumerate(chats, 1):
+            text += f"{i}. Беседа {peer_id}\n"
+        
+        if len(text) > 4000:
+            for i in range(0, len(text), 4000):
+                await msg.answer(text[i:i+4000])
+        else:
+            await msg.answer(text)
+    finally: conn.close()
+
+@bot.on.message(text="/globalban <target_id> <time_str> <reason>")
+async def globalban_cmd(msg: Message, target_id: str, time_str: str, reason: str):
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
+        return
+    
+    try: uid = int(target_id)
+    except: return await msg.answer("❌ ID должен быть числом")
+    
+    duration = None
+    if time_str.lower() != "permanent":
+        parsed = parse_time(time_str)
+        if parsed: duration = parsed
+    end_time = datetime.now() + duration if duration else None
+    ft = format_time(duration) if duration else "навсегда"
+    
+    conn, cur = db()
+    try:
+        cur.execute("SELECT DISTINCT peer_id FROM users")
+        chats = cur.fetchall()
+        user_name = await get_user_name(uid)
+        
+        for (peer_id,) in chats:
+            try:
+                cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at, reason, banned_by) VALUES (%s,%s,'ban',%s,%s,%s)", (uid, peer_id, end_time, reason, msg.from_id))
+                await kick_user(peer_id, uid)
+            except: pass
+        
+        await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📝 {reason}\n📊 Все беседы")
+    finally: conn.close()
+
+@bot.on.message(text="/globalunban <target_id>")
+async def globalunban_cmd(msg: Message, target_id: str):
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
+        return
+    
+    try: uid = int(target_id)
+    except: return await msg.answer("❌ ID должен быть числом")
+    
+    conn, cur = db()
+    try:
+        cur.execute("DELETE FROM punishments WHERE user_id=%s AND type='ban'", (uid,))
+        await msg.answer(f"✅ Глобальный разбан\n👤 id{uid}")
+    finally: conn.close()
+
+@bot.on.message(text="/broadcast <text>")
+async def broadcast_cmd(msg: Message, text: str):
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
+        return
+    
+    conn, cur = db()
+    try:
+        cur.execute("SELECT DISTINCT peer_id FROM users")
+        chats = cur.fetchall()
+        
+        for (peer_id,) in chats:
+            try:
+                await bot.api.messages.send(peer_id=peer_id, message=f"📢 РАССЫЛКА\n\n{text}", random_id=0)
+            except: pass
+        
+        await msg.answer(f"📢 Рассылка отправлена в {len(chats)} бесед")
+    finally: conn.close()
+
+# =========================
+# START (только в беседах)
 # =========================
 @bot.on.message(text="/start")
 async def start(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         try:
@@ -314,6 +433,7 @@ async def start(msg: Message):
 # =========================
 @bot.on.message(text="/setcmd")
 async def setcmd_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'setcmd')
@@ -328,6 +448,7 @@ async def setcmd_help(msg: Message):
 
 @bot.on.message(text="/setcmd <cmd_name> <priority>")
 async def setcmd(msg: Message, cmd_name: str, priority: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'setcmd')
@@ -341,67 +462,83 @@ async def setcmd(msg: Message, cmd_name: str, priority: str):
     finally: conn.close()
 
 # =========================
+# GSETCMD (глобальная настройка прав)
+# =========================
+@bot.on.message(text="/gsetcmd")
+async def gsetcmd_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        req = get_cmd_required_role(cur, msg.peer_id, 'gsetcmd')
+        return await msg.answer(f"🌐 /gsetcmd [команда] [приоритет]\nГлобальная настройка прав во всех беседах объединения\nТребуется роль {req}+")
+    finally: conn.close()
+
+@bot.on.message(text="/gsetcmd <cmd_name> <priority>")
+async def gsetcmd_cmd(msg: Message, cmd_name: str, priority: str):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'gsetcmd')
+        if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
+        group_id = get_group_id(cur, msg.peer_id)
+        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        if cmd_name.lower() == "sysrole": return await msg.answer("❌ Нельзя изменить /sysrole")
+        try: p = int(priority)
+        except: return await msg.answer("❌ Приоритет - число")
+        if p < 0 or p > 1000: return await msg.answer("❌ Приоритет от 0 до 1000")
+        chats = get_group_chats(cur, group_id)
+        for peer_id in chats:
+            try:
+                cur.execute("INSERT INTO cmd_permissions (peer_id, cmd_name, required_role) VALUES (%s,%s,%s) ON CONFLICT (peer_id, cmd_name) DO UPDATE SET required_role=%s", (peer_id, cmd_name.lower(), p, p))
+            except: pass
+        await msg.answer(f"🌐 ГЛОБАЛЬНАЯ НАСТРОЙКА\n/{cmd_name.lower()} - роль {p}+\n📊 {len(chats)} бесед")
+    finally: conn.close()
+
+# =========================
 # GROUPS
 # =========================
 @bot.on.message(text="/groups")
 async def groups_help(msg: Message):
-    return await msg.answer("🌐 /groups - ваши объединения\n/groups [ID] - инфо об объединении")
+    if msg.peer_id < 2000000000: return
+    return await msg.answer("🌐 /groups - ваши объединения\n/groups [ID] - инфо")
 
 @bot.on.message(text="/groups <group_id>")
 async def groups_info(msg: Message, group_id: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         try: gid = int(group_id)
         except: return await msg.answer("❌ ID должен быть числом")
-        
         cur.execute("SELECT name, creator_id FROM groups WHERE id=%s", (gid,))
         group = cur.fetchone()
         if not group: return await msg.answer("❌ Объединение не найдено")
-        
         chats = get_group_chats(cur, gid)
         creator_name = await get_user_name(group[1])
-        
-        text = f"🌐 ОБЪЕДИНЕНИЕ {group[0]}\n\n"
-        text += f"📋 Название: {group[0]}\n"
-        text += f"🆔 ID: {gid}\n"
-        text += f"👑 Создатель: {creator_name}\n"
-        text += f"📊 Бесед привязано: {len(chats)}\n\n"
-        
-        if chats:
-            text += "📋 БЕСЕДЫ:\n"
-            for i, peer_id in enumerate(chats, 1):
-                text += f"  {i}. Беседа {peer_id}\n"
-        
-        text += f"\n💡 Привязать: /setgroup {gid}"
+        text = f"🌐 {group[0]}\n🆔 ID: {gid}\n👑 Создатель: {creator_name}\n📊 Бесед: {len(chats)}"
         await msg.answer(text)
     finally: conn.close()
 
 @bot.on.message(text="/groups")
 async def groups_list(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         cur.execute("SELECT id, name FROM groups WHERE creator_id=%s ORDER BY id", (msg.from_id,))
         groups = cur.fetchall()
-        
-        if not groups:
-            return await msg.answer("🌐 ВАШИ ОБЪЕДИНЕНИЯ\n\n❌ У вас нет объединений\n\nСоздайте: /creategroup Название")
-        
-        text = "🌐 ВАШИ ОБЪЕДИНЕНИЯ\n\n"
+        if not groups: return await msg.answer("🌐 У вас нет объединений\n/creategroup Название")
+        text = "🌐 ВАШИ ОБЪЕДИНЕНИЯ:\n\n"
         for gid, name in groups:
             chats = get_group_chats(cur, gid)
-            text += f"📋 {name} (ID: {gid})\n"
-            text += f"   📊 Бесед: {len(chats)}\n"
-            text += f"   💡 Инфо: /groups {gid}\n\n"
-        
-        text += "💡 Привязать беседу: /setgroup [ID]"
+            text += f"📋 {name} (ID: {gid}) - бесед: {len(chats)}\n"
         await msg.answer(text)
     finally: conn.close()
 
 # =========================
-# CREATEGROUP
+# CREATEGROUP / SETGROUP / LEAVEGROUP
 # =========================
 @bot.on.message(text="/creategroup")
 async def creategroup_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'creategroup')
@@ -410,6 +547,7 @@ async def creategroup_help(msg: Message):
 
 @bot.on.message(text="/creategroup <name>")
 async def creategroup_cmd(msg: Message, name: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'creategroup')
@@ -417,22 +555,21 @@ async def creategroup_cmd(msg: Message, name: str):
         if len(name) > 50: return await msg.answer("❌ Макс. 50 символов")
         cur.execute("INSERT INTO groups (name, creator_id) VALUES (%s, %s) RETURNING id", (name, msg.from_id))
         group_id = cur.fetchone()[0]
-        await msg.answer(f"🌐 ОБЪЕДИНЕНИЕ СОЗДАНО\n📋 {name}\n🆔 ID: {group_id}\n👑 Вы создатель\n💡 /setgroup {group_id}")
+        await msg.answer(f"🌐 СОЗДАНО\n📋 {name}\n🆔 ID: {group_id}\n💡 /setgroup {group_id}")
     finally: conn.close()
 
-# =========================
-# SETGROUP (только создатель)
-# =========================
 @bot.on.message(text="/setgroup")
 async def setgroup_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'setgroup')
-        return await msg.answer(f"🌐 /setgroup [ID]\nПривязать беседу к СВОЕМУ объединению\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /setgroup [ID]\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/setgroup <group_id>")
 async def setgroup_cmd(msg: Message, group_id: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'setgroup')
@@ -442,57 +579,48 @@ async def setgroup_cmd(msg: Message, group_id: str):
         cur.execute("SELECT name, creator_id FROM groups WHERE id=%s", (gid,))
         group = cur.fetchone()
         if not group: return await msg.answer("❌ Объединение не найдено")
-        
         if msg.from_id != group[1] and msg.from_id != OWNER_ID:
-            return await msg.answer("❌ Только создатель объединения может привязывать беседы")
-        
+            return await msg.answer("❌ Только создатель может привязывать беседы")
         cur.execute("INSERT INTO group_chats (group_id, peer_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (gid, msg.peer_id))
-        await msg.answer(f"🌐 БЕСЕДА ПРИВЯЗАНА\n📋 {group[0]}\n🆔 ID: {gid}")
+        await msg.answer(f"🌐 ПРИВЯЗАНО\n📋 {group[0]}\n🆔 ID: {gid}")
     finally: conn.close()
 
-# =========================
-# LEAVEGROUP (только создатель)
-# =========================
 @bot.on.message(text="/leavegroup")
 async def leavegroup_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'leavegroup')
-        return await msg.answer(f"🌐 /leavegroup - отвязать беседу\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /leavegroup - отвязать\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/leavegroup")
 async def leavegroup_cmd(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'leavegroup')
         if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
-        
-        cur.execute("""
-        SELECT g.id, g.creator_id FROM groups g 
-        JOIN group_chats gc ON g.id = gc.group_id 
-        WHERE gc.peer_id = %s
-        """, (msg.peer_id,))
+        cur.execute("SELECT g.id, g.creator_id FROM groups g JOIN group_chats gc ON g.id=gc.group_id WHERE gc.peer_id=%s", (msg.peer_id,))
         group = cur.fetchone()
-        
-        if not group: return await msg.answer("❌ Беседа не привязана к объединению")
-        
+        if not group: return await msg.answer("❌ Беседа не привязана")
         if msg.from_id != group[1] and msg.from_id != OWNER_ID:
-            return await msg.answer("❌ Только создатель объединения может отвязывать беседы")
-        
+            return await msg.answer("❌ Только создатель может отвязывать")
         cur.execute("DELETE FROM group_chats WHERE peer_id=%s", (msg.peer_id,))
-        await msg.answer("🌐 Беседа отвязана")
+        await msg.answer("🌐 Отвязано")
     finally: conn.close()
 
 # =========================
-# GBAN
+# GBAN / GKICK / GGIVEROLE / GREMOVEROLE / GZOV / GSNICK / GRNICK
 # =========================
+
 @bot.on.message(text="/gban")
 async def gban_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'gban')
-        return await msg.answer(f"🌐 /gban @user [время] [причина]\nГлобальный бан\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /gban @user [время] [причина]\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/gban <target> <time_str> <reason>")
@@ -504,12 +632,13 @@ async def gban_simple(msg: Message, target: str, time_str: str):
     await process_gban(msg, target, time_str, "")
 
 async def process_gban(msg: Message, target: str, time_str: str, reason: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'gban')
         if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
         group_id = get_group_id(cur, msg.peer_id)
-        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        if not group_id: return await msg.answer("❌ Беседа не привязана")
         uid = get_target_id(msg)
         if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
@@ -534,25 +663,24 @@ async def process_gban(msg: Message, target: str, time_str: str, reason: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GKICK
-# =========================
 @bot.on.message(text="/gkick")
 async def gkick_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'gkick')
-        return await msg.answer(f"🌐 /gkick @user\nГлобальный кик\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /gkick @user\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/gkick <target>")
 async def gkick_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'gkick')
         if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
         group_id = get_group_id(cur, msg.peer_id)
-        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        if not group_id: return await msg.answer("❌ Беседа не привязана")
         uid = get_target_id(msg)
         if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
@@ -568,32 +696,31 @@ async def gkick_cmd(msg: Message, target: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ КИК\n👤 {user_name}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GGIVEROLE
-# =========================
 @bot.on.message(text="/ggiverole")
 async def ggiverole_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'ggiverole')
-        return await msg.answer(f"🌐 /ggiverole @user [приоритет]\nГлобальная выдача роли\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /ggiverole @user [приоритет]\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/ggiverole <target> <priority>")
 async def ggiverole_cmd(msg: Message, target: str, priority: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'ggiverole')
         if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
         group_id = get_group_id(cur, msg.peer_id)
-        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        if not group_id: return await msg.answer("❌ Беседа не привязана")
         uid = get_target_id(msg)
         if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
         try: p = int(priority)
         except: return await msg.answer("❌ Приоритет - число")
         if not role_exists(cur, msg.peer_id, p):
-            return await msg.answer(f"❌ Роль с приоритетом {p} не создана\nСоздайте: /addrole {p} Название")
+            return await msg.answer(f"❌ Роль {p} не создана\n/addrole {p} Название")
         if p >= user_role and msg.from_id != OWNER_ID: return await msg.answer(f"❌ Нельзя выдать роль {p}")
         if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             return await msg.answer("❌ Нельзя выдать роль равному или высшему")
@@ -608,25 +735,24 @@ async def ggiverole_cmd(msg: Message, target: str, priority: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНАЯ РОЛЬ\n👤 {user_name}\n📋 {get_role_name(cur, msg.peer_id, p)}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GREMOVEROLE
-# =========================
 @bot.on.message(text="/gremoverole")
 async def gremoverole_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'gremoverole')
-        return await msg.answer(f"🌐 /gremoverole @user\nГлобальный сброс роли\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /gremoverole @user\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/gremoverole <target>")
 async def gremoverole_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'gremoverole')
         if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
         group_id = get_group_id(cur, msg.peer_id)
-        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        if not group_id: return await msg.answer("❌ Беседа не привязана")
         uid = get_target_id(msg)
         if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
@@ -642,25 +768,24 @@ async def gremoverole_cmd(msg: Message, target: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ СБРОС РОЛИ\n👤 {user_name}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GZOV
-# =========================
 @bot.on.message(text="/gzov")
 async def gzov_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'gzov')
-        return await msg.answer(f"🌐 /gzov [причина]\nГлобальный зов\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /gzov [причина]\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/gzov <reason>")
 async def gzov_cmd(msg: Message, reason: str = "Без причины"):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'gzov')
         if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
         group_id = get_group_id(cur, msg.peer_id)
-        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        if not group_id: return await msg.answer("❌ Беседа не привязана")
         chats = get_group_chats(cur, group_id)
         caller_name = await get_user_name(msg.from_id)
         for peer_id in chats:
@@ -677,26 +802,25 @@ async def gzov_cmd(msg: Message, reason: str = "Без причины"):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ ЗОВ\n🔊 {caller_name}\n📢 {reason}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GSNICK
-# =========================
 @bot.on.message(text="/gsnick")
 async def gsnick_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'gsnick')
-        return await msg.answer(f"🌐 /gsnick @user [ник]\nГлобальная установка ника\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /gsnick @user [ник]\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/gsnick <target> <nick>")
 async def gsnick_cmd(msg: Message, target: str, nick: str):
+    if msg.peer_id < 2000000000: return
     if len(nick) > 50: return await msg.answer("❌ Макс. 50 символов")
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'gsnick')
         if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
         group_id = get_group_id(cur, msg.peer_id)
-        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        if not group_id: return await msg.answer("❌ Беседа не привязана")
         uid = get_target_id(msg)
         if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
@@ -712,25 +836,24 @@ async def gsnick_cmd(msg: Message, target: str, nick: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ НИК\n👤 {user_name}\n🏷 {nick}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GRNICK
-# =========================
 @bot.on.message(text="/grnick")
 async def grnick_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'grnick')
-        return await msg.answer(f"🌐 /grnick @user\nГлобальное удаление ника\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /grnick @user\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/grnick <target>")
 async def grnick_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'grnick')
         if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
         group_id = get_group_id(cur, msg.peer_id)
-        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        if not group_id: return await msg.answer("❌ Беседа не привязана")
         uid = get_target_id(msg)
         if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
         if not uid: return await msg.answer("❌ Пользователь не найден")
@@ -751,6 +874,7 @@ async def grnick_cmd(msg: Message, target: str):
 # =========================
 @bot.on.message(text="/zov")
 async def zov_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'zov')
@@ -759,6 +883,7 @@ async def zov_help(msg: Message):
 
 @bot.on.message(text="/zov <reason>")
 async def zov_cmd(msg: Message, reason: str = "Без причины"):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'zov')
@@ -775,15 +900,17 @@ async def zov_cmd(msg: Message, reason: str = "Без причины"):
     finally: conn.close()
 
 # =========================
-# SYSRole
+# SYSRole / ADDROLE / GIVEROLE / REMOVEROLE / DELROLE / ROLES / STAFF
 # =========================
 @bot.on.message(text="/sysrole")
 async def sysrole_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     if msg.from_id != OWNER_ID: return await msg.answer("❌ Только для владельца бота")
     return await msg.answer("👑 /sysrole @user [приоритет]")
 
 @bot.on.message(text="/sysrole <target> <priority>")
 async def sysrole_cmd(msg: Message, target: str, priority: str):
+    if msg.peer_id < 2000000000: return
     if msg.from_id != OWNER_ID: return await msg.answer("❌ Только для владельца бота")
     uid = get_target_id(msg)
     if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
@@ -797,11 +924,9 @@ async def sysrole_cmd(msg: Message, target: str, priority: str):
         await msg.answer(f"🎖️ РОЛЬ ВЫДАНА\n👤 {await get_user_name(uid)}\n📋 {role_display}")
     finally: conn.close()
 
-# =========================
-# ADDROLE
-# =========================
 @bot.on.message(text="/addrole")
 async def addrole_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'addrole')
@@ -810,6 +935,7 @@ async def addrole_help(msg: Message):
 
 @bot.on.message(text="/addrole <priority> <role_name>")
 async def addrole(msg: Message, priority: str, role_name: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'addrole')
@@ -822,11 +948,9 @@ async def addrole(msg: Message, priority: str, role_name: str):
         await msg.answer(f"✅ Роль: {role_name} (приоритет {p})")
     finally: conn.close()
 
-# =========================
-# GIVEROLE
-# =========================
 @bot.on.message(text="/giverole")
 async def giverole_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'giverole')
@@ -835,6 +959,7 @@ async def giverole_help(msg: Message):
 
 @bot.on.message(text="/giverole <target> <priority>")
 async def giverole_cmd(msg: Message, target: str, priority: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'giverole')
@@ -847,18 +972,16 @@ async def giverole_cmd(msg: Message, target: str, priority: str):
         try: p = int(priority)
         except: return await msg.answer("❌ Приоритет - число")
         if not role_exists(cur, msg.peer_id, p):
-            return await msg.answer(f"❌ Роль с приоритетом {p} не создана\nСоздайте: /addrole {p} Название")
+            return await msg.answer(f"❌ Роль {p} не создана\n/addrole {p} Название")
         if p >= user_role and msg.from_id != OWNER_ID: return await msg.answer(f"❌ Нельзя выдать роль {p}")
         cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (uid, msg.peer_id, p, p))
         role_display = get_role_name(cur, msg.peer_id, p)
         await msg.answer(f"🎖️ РОЛЬ ВЫДАНА\n👤 {await get_user_name(uid)}\n📋 {role_display}")
     finally: conn.close()
 
-# =========================
-# REMOVEROLE
-# =========================
 @bot.on.message(text="/removerole")
 async def removerole_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'removerole')
@@ -867,6 +990,7 @@ async def removerole_help(msg: Message):
 
 @bot.on.message(text="/removerole <target>")
 async def removerole_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'removerole')
@@ -880,11 +1004,9 @@ async def removerole_cmd(msg: Message, target: str):
         await msg.answer(f"🗑 РОЛЬ СБРОШЕНА\n👤 {await get_user_name(uid)}")
     finally: conn.close()
 
-# =========================
-# DELROLE
-# =========================
 @bot.on.message(text="/delrole")
 async def delrole_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'delrole')
@@ -893,6 +1015,7 @@ async def delrole_help(msg: Message):
 
 @bot.on.message(text="/delrole <priority>")
 async def delrole_cmd(msg: Message, priority: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'delrole')
@@ -907,11 +1030,9 @@ async def delrole_cmd(msg: Message, priority: str):
         await msg.answer(f"🗑 РОЛЬ УДАЛЕНА\n📋 {role_data[0]}")
     finally: conn.close()
 
-# =========================
-# ROLES / STAFF
-# =========================
 @bot.on.message(text="/roles")
 async def list_roles(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         cur.execute("SELECT role_priority, role_name FROM roles WHERE peer_id=%s ORDER BY role_priority DESC", (msg.peer_id,))
@@ -924,6 +1045,7 @@ async def list_roles(msg: Message):
 
 @bot.on.message(text="/staff")
 async def staff(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         cur.execute("SELECT user_id, role FROM users WHERE peer_id=%s AND role>0 ORDER BY role DESC LIMIT 50", (msg.peer_id,))
@@ -940,10 +1062,12 @@ async def staff(msg: Message):
     finally: conn.close()
 
 # =========================
-# WARN
+# WARN / MUTE / UNMUTE / BAN / UNBAN / GETBAN / KICK
 # =========================
+
 @bot.on.message(text="/warn")
 async def warn_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'warn')
@@ -952,6 +1076,7 @@ async def warn_help(msg: Message):
 
 @bot.on.message(text="/warn <target> <reason>")
 async def warn_cmd(msg: Message, target: str, reason: str = "Без причины"):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'warn')
@@ -972,11 +1097,9 @@ async def warn_cmd(msg: Message, target: str, reason: str = "Без причин
         await msg.answer(f"⚠️ ПРЕДУПРЕЖДЕНИЕ\n👤 {user_name}\n{warns}/3\n📝 {reason}")
     finally: conn.close()
 
-# =========================
-# MUTE
-# =========================
 @bot.on.message(text="/mute")
 async def mute_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'mute')
@@ -985,10 +1108,12 @@ async def mute_help(msg: Message):
 
 @bot.on.message(text="/mute <target> <time_str> <reason>")
 async def mute_full(msg: Message, target: str, time_str: str, reason: str):
+    if msg.peer_id < 2000000000: return
     await process_mute(msg, target, time_str, reason)
 
 @bot.on.message(text="/mute <target> <time_str>")
 async def mute_simple(msg: Message, target: str, time_str: str):
+    if msg.peer_id < 2000000000: return
     await process_mute(msg, target, time_str, "")
 
 async def process_mute(msg: Message, target: str, time_str: str, reason: str):
@@ -1012,11 +1137,9 @@ async def process_mute(msg: Message, target: str, time_str: str, reason: str):
         await msg.answer(f"🔇 МУТ\n👤 {await get_user_name(uid)}\n⏰ {ft}\n📝 {final_reason}")
     finally: conn.close()
 
-# =========================
-# UNMUTE
-# =========================
 @bot.on.message(text="/unmute")
 async def unmute_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'unmute')
@@ -1025,6 +1148,7 @@ async def unmute_help(msg: Message):
 
 @bot.on.message(text="/unmute <target>")
 async def unmute_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'unmute')
@@ -1038,11 +1162,9 @@ async def unmute_cmd(msg: Message, target: str):
         await msg.answer("🔊 Мут снят")
     finally: conn.close()
 
-# =========================
-# BAN
-# =========================
 @bot.on.message(text="/ban")
 async def ban_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'ban')
@@ -1051,10 +1173,12 @@ async def ban_help(msg: Message):
 
 @bot.on.message(text="/ban <target> <time_str> <reason>")
 async def ban_full(msg: Message, target: str, time_str: str, reason: str):
+    if msg.peer_id < 2000000000: return
     await process_ban(msg, target, time_str, reason)
 
 @bot.on.message(text="/ban <target> <time_str>")
 async def ban_simple(msg: Message, target: str, time_str: str):
+    if msg.peer_id < 2000000000: return
     await process_ban(msg, target, time_str, "")
 
 async def process_ban(msg: Message, target: str, time_str: str, reason: str):
@@ -1080,11 +1204,9 @@ async def process_ban(msg: Message, target: str, time_str: str, reason: str):
         await msg.answer(f"🚫 БАН\n👤 {await get_user_name(uid)}\n⏰ {ft}\n📝 {final_reason}")
     finally: conn.close()
 
-# =========================
-# UNBAN
-# =========================
 @bot.on.message(text="/unban")
 async def unban_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'unban')
@@ -1093,6 +1215,7 @@ async def unban_help(msg: Message):
 
 @bot.on.message(text="/unban <target>")
 async def unban_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'unban')
@@ -1106,68 +1229,37 @@ async def unban_cmd(msg: Message, target: str):
         await msg.answer("✅ Бан снят")
     finally: conn.close()
 
-# =========================
-# GETBAN
-# =========================
 @bot.on.message(text="/getban")
 async def getban_help(msg: Message):
-    return await msg.answer("🔍 /getban @user - информация о бане\nПричина, дата, кто выдал")
+    if msg.peer_id < 2000000000: return
+    return await msg.answer("🔍 /getban @user - информация о бане")
 
 @bot.on.message(text="/getban <target>")
 async def getban_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
     uid = get_target_id(msg)
     if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
     if not uid: return await msg.answer("❌ Пользователь не найден")
-    
     conn, cur = db()
     try:
-        cur.execute("""
-        SELECT reason, created_at, end_at, banned_by FROM punishments 
-        WHERE user_id=%s AND peer_id=%s AND type='ban' 
-        AND (end_at IS NULL OR end_at > NOW())
-        ORDER BY created_at DESC LIMIT 1
-        """, (uid, msg.peer_id))
-        
+        cur.execute("SELECT reason, created_at, end_at, banned_by FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban' AND (end_at IS NULL OR end_at > NOW()) ORDER BY created_at DESC LIMIT 1", (uid, msg.peer_id))
         ban = cur.fetchone()
         user_name = await get_user_name(uid)
-        
-        if not ban:
-            return await msg.answer(f"🔍 ИНФОРМАЦИЯ О БАНЕ\n\n👤 {user_name}\n✅ Не забанен")
-        
+        if not ban: return await msg.answer(f"🔍 {user_name}\n✅ Не забанен")
         reason, created_at, end_at, banned_by = ban
-        
-        if end_at:
-            ban_type = f"⏰ Временный (до {end_at.strftime('%d.%m.%Y %H:%M')})"
-        else:
-            ban_type = "🚫 Перманентный"
-        
+        ban_type = f"⏰ Временный (до {end_at.strftime('%d.%m.%Y %H:%M')})" if end_at else "🚫 Перманентный"
         created_str = created_at.strftime('%d.%m.%Y в %H:%M') if created_at else "Неизвестно"
-        
         if banned_by:
-            try:
-                banner_name = await get_user_name(banned_by)
-                banner_text = f"👮 Выдал: {banner_name}"
-            except:
-                banner_text = f"👮 Выдал: id{banned_by}"
-        else:
-            banner_text = "👮 Выдал: Неизвестно"
-        
-        await msg.answer(
-            f"🔍 ИНФОРМАЦИЯ О БАНЕ\n\n"
-            f"👤 {user_name}\n"
-            f"📋 Тип: {ban_type}\n"
-            f"📝 Причина: {reason}\n"
-            f"📅 Забанен: {created_str}\n"
-            f"{banner_text}\n"
-            f"🆔 ID: {uid}"
-        )
+            try: banner_name = await get_user_name(banned_by)
+            except: banner_name = f"id{banned_by}"
+            banner_text = f"👮 Выдал: {banner_name}"
+        else: banner_text = "👮 Выдал: Неизвестно"
+        await msg.answer(f"🔍 ИНФО О БАНЕ\n\n👤 {user_name}\n📋 {ban_type}\n📝 {reason}\n📅 {created_str}\n{banner_text}")
     finally: conn.close()
 
-# =========================
-# KICK
-# =========================
 @bot.on.message(text="/kick")
 async def kick_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'kick')
@@ -1176,6 +1268,7 @@ async def kick_help(msg: Message):
 
 @bot.on.message(text="/kick <target>")
 async def kick_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'kick')
@@ -1194,6 +1287,7 @@ async def kick_cmd(msg: Message, target: str):
 # =========================
 @bot.on.message(text="/snick")
 async def snick_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'snick')
@@ -1202,6 +1296,7 @@ async def snick_help(msg: Message):
 
 @bot.on.message(text="/snick <target> <nick>")
 async def snick_cmd(msg: Message, target: str, nick: str):
+    if msg.peer_id < 2000000000: return
     if len(nick) > 50: return await msg.answer("❌ Макс. 50 символов")
     uid = get_target_id(msg)
     if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
@@ -1221,6 +1316,7 @@ async def snick_cmd(msg: Message, target: str, nick: str):
 
 @bot.on.message(text="/rnick")
 async def rnick_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'rnick')
@@ -1229,6 +1325,7 @@ async def rnick_help(msg: Message):
 
 @bot.on.message(text="/rnick <target>")
 async def rnick_cmd(msg: Message, target: str = ""):
+    if msg.peer_id < 2000000000: return
     uid = get_target_id(msg)
     if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
     if not uid: uid = msg.from_id
@@ -1249,10 +1346,12 @@ async def rnick_cmd(msg: Message, target: str = ""):
 
 @bot.on.message(text="/gnick")
 async def gnick_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     return await msg.answer("🏷 /gnick @user - узнать ник\nИли ответом: /gnick")
 
 @bot.on.message(text="/gnick <target>")
 async def gnick_cmd(msg: Message, target: str = ""):
+    if msg.peer_id < 2000000000: return
     uid = get_target_id(msg)
     if not uid and target: uid = await resolve_user_id(target.replace("@", "").strip())
     if not uid: uid = msg.from_id
@@ -1261,13 +1360,13 @@ async def gnick_cmd(msg: Message, target: str = ""):
         cur.execute("SELECT nickname FROM users WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
         res = cur.fetchone()
         user_name = await get_user_name(uid)
-        if not res or not res[0]:
-            return await msg.answer(f"🏷 НИК НЕ УСТАНОВЛЕН\n👤 {user_name}")
+        if not res or not res[0]: return await msg.answer(f"🏷 НИК НЕ УСТАНОВЛЕН\n👤 {user_name}")
         await msg.answer(f"🏷 НИК\n👤 {user_name}\n🏷 {res[0]}")
     finally: conn.close()
 
 @bot.on.message(text="/nlist")
 async def nlist(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         cur.execute("SELECT user_id, nickname FROM users WHERE peer_id=%s AND nickname IS NOT NULL ORDER BY nickname", (msg.peer_id,))
@@ -1286,6 +1385,7 @@ async def nlist(msg: Message):
 
 @bot.on.message(text="/clearnicks")
 async def clearnicks(msg: Message):
+    if msg.peer_id < 2000000000: return
     conn, cur = db()
     try:
         ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'clearnicks')
@@ -1305,10 +1405,12 @@ async def clearnicks(msg: Message):
 
 @bot.on.message(text="/stats")
 async def stats_help(msg: Message):
+    if msg.peer_id < 2000000000: return
     return await msg.answer("📊 /stats @user\nИли ответом: /stats")
 
 @bot.on.message(text="/stats <target>")
 async def stats_cmd(msg: Message, target: str = ""):
+    if msg.peer_id < 2000000000: return
     uid = get_target_id(msg)
     if not uid and target: uid = await resolve_user_id(target.replace("@", "").strip())
     if not uid: uid = msg.from_id
@@ -1337,6 +1439,13 @@ async def handler(msg: Message):
     conn, cur = db()
     try:
         uid, pid = msg.from_id, msg.peer_id
+        
+        # Игнорируем личные сообщения от обычных пользователей
+        if pid < 2000000000 and uid != OWNER_ID:
+            return
+        
+        if pid < 2000000000:
+            return  # Админ-команды уже обработаны выше
         
         if msg.action and msg.action.type == 'chat_kick_user':
             if msg.action.member_id == uid:
