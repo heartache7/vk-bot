@@ -277,7 +277,7 @@ async def get_chat_members_mentions(peer_id):
 # =========================
 @bot.on.message(text="/help")
 async def help_cmd(msg: Message):
-    if msg.peer_id < 2000000000: return  # Игнорируем ЛС для этой команды
+    if msg.peer_id < 2000000000: return
     return await msg.answer(
         "💠 FLEX BOT\n\n"
         "🏷 /snick /rnick /gnick /nlist /clearnicks\n"
@@ -332,9 +332,13 @@ async def admin_chats(msg: Message):
     
     conn, cur = db()
     try:
-        cur.execute("SELECT DISTINCT peer_id FROM users ORDER BY peer_id")
+        cur.execute("SELECT COUNT(DISTINCT peer_id) FROM users WHERE peer_id > 2000000000")
+        total = cur.fetchone()[0]
+        
+        cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000 ORDER BY peer_id")
         chats = cur.fetchall()
-        text = "📋 БЕСЕДЫ БОТА:\n\n"
+        
+        text = f"📋 БЕСЕДЫ БОТА (всего: {total}):\n\n"
         for i, (peer_id,) in enumerate(chats, 1):
             text += f"{i}. Беседа {peer_id}\n"
         
@@ -362,7 +366,7 @@ async def globalban_cmd(msg: Message, target_id: str, time_str: str, reason: str
     
     conn, cur = db()
     try:
-        cur.execute("SELECT DISTINCT peer_id FROM users")
+        cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000")
         chats = cur.fetchall()
         user_name = await get_user_name(uid)
         
@@ -372,7 +376,7 @@ async def globalban_cmd(msg: Message, target_id: str, time_str: str, reason: str
                 await kick_user(peer_id, uid)
             except: pass
         
-        await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📝 {reason}\n📊 Все беседы")
+        await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📝 {reason}\n📊 Все беседы ({len(chats)})")
     finally: conn.close()
 
 @bot.on.message(text="/globalunban <target_id>")
@@ -396,7 +400,7 @@ async def broadcast_cmd(msg: Message, text: str):
     
     conn, cur = db()
     try:
-        cur.execute("SELECT DISTINCT peer_id FROM users")
+        cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000")
         chats = cur.fetchall()
         
         for (peer_id,) in chats:
@@ -462,7 +466,7 @@ async def setcmd(msg: Message, cmd_name: str, priority: str):
     finally: conn.close()
 
 # =========================
-# GSETCMD (глобальная настройка прав)
+# GSETCMD
 # =========================
 @bot.on.message(text="/gsetcmd")
 async def gsetcmd_help(msg: Message):
@@ -470,7 +474,7 @@ async def gsetcmd_help(msg: Message):
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'gsetcmd')
-        return await msg.answer(f"🌐 /gsetcmd [команда] [приоритет]\nГлобальная настройка прав во всех беседах объединения\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /gsetcmd [команда] [приоритет]\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/gsetcmd <cmd_name> <priority>")
@@ -1444,8 +1448,9 @@ async def handler(msg: Message):
         if pid < 2000000000 and uid != OWNER_ID:
             return
         
+        # Владелец уже обработан командами выше
         if pid < 2000000000:
-            return  # Админ-команды уже обработаны выше
+            return
         
         if msg.action and msg.action.type == 'chat_kick_user':
             if msg.action.member_id == uid:
