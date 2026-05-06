@@ -83,16 +83,16 @@ def init():
             );""")
 
             default_permissions = [
-                ('warn', 10), ('mute', 10), ('unmute', 10),
-                ('ban', 50), ('unban', 50), ('kick', 10),
-                ('snick', 10), ('rnick', 10), ('giverole', 60),
-                ('stats', 0), ('addrole', 100), ('removerole', 60),
-                ('delrole', 100), ('nlist', 0), ('clearnicks', 60),
-                ('zov', 50), ('setcmd', 100), ('gsetcmd', 100),
+                ('warn', 20), ('mute', 20), ('unmute', 20),
+                ('ban', 50), ('unban', 50), ('kick', 20),
+                ('snick', 20), ('rnick', 20), ('giverole', 50),
+                ('stats', 0), ('addrole', 100), ('removerole', 50),
+                ('delrole', 100), ('nlist', 20), ('clearnicks', 60),
+                ('zov', 20), ('setcmd', 100), ('gsetcmd', 100),
                 ('creategroup', 100), ('setgroup', 100), ('leavegroup', 100),
-                ('gban', 60), ('gkick', 60), ('ggiverole', 60), ('gzov', 60),
-                ('gremoverole', 60), ('gsnick', 60), ('grnick', 60),
-                ('gnick', 0), ('getban', 0), ('groups', 0)
+                ('gban', 50), ('gkick', 50), ('ggiverole', 50), ('gzov', 50),
+                ('gremoverole', 50), ('gsnick', 50), ('grnick', 50),
+                ('gunban', 50), ('gnick', 20), ('getban', 50), ('groups', 100)
             ]
             
             for cmd, role in default_permissions:
@@ -279,7 +279,7 @@ async def help_cmd(msg: Message):
         "📢 /zov\n"
         "🌐 ОБЪЕДИНЕНИЯ:\n"
         "/creategroup /setgroup /leavegroup /groups\n"
-        "/gban /gkick /ggiverole /gremoverole /gzov /gsnick /grnick /gsetcmd\n"
+        "/gban /gunban /gkick /ggiverole /gremoverole /gzov /gsnick /grnick /gsetcmd\n"
         "📊 /stats\n⚙️ /setcmd /gsetcmd\n👑 /sysrole"
     )
 
@@ -289,7 +289,6 @@ async def help_cmd(msg: Message):
 @bot.on.message(text="/admin")
 async def admin_panel(msg: Message):
     if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
     conn, cur = db()
     try:
         cur.execute("SELECT COUNT(DISTINCT peer_id) FROM users WHERE peer_id > 2000000000")
@@ -300,7 +299,6 @@ async def admin_panel(msg: Message):
         active_bans = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM groups")
         total_groups = cur.fetchone()[0]
-        
         await msg.answer(
             f"👑 АДМИН-ПАНЕЛЬ FLEX BOT\n\n"
             f"📊 Статистика:\n"
@@ -334,18 +332,15 @@ async def admin_help(msg: Message):
 @bot.on.message(text="/adminchats")
 async def admin_chats(msg: Message):
     if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
     conn, cur = db()
     try:
         cur.execute("SELECT COUNT(DISTINCT peer_id) FROM users WHERE peer_id > 2000000000")
         total = cur.fetchone()[0]
         cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000 ORDER BY peer_id")
         chats = cur.fetchall()
-        
         text = f"📋 БЕСЕДЫ БОТА (всего: {total}):\n\n"
         for i, (peer_id,) in enumerate(chats, 1):
             text += f"{i}. Беседа {peer_id}\n"
-        
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
                 await msg.answer(text[i:i+4000])
@@ -356,39 +351,32 @@ async def admin_chats(msg: Message):
 @bot.on.message(text="/globalban <target_id> <time_str> <reason>")
 async def globalban_cmd(msg: Message, target_id: str, time_str: str, reason: str):
     if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
     try: uid = int(target_id)
     except: return await msg.answer("❌ ID должен быть числом")
-    
     duration = None
     if time_str.lower() != "permanent":
         parsed = parse_time(time_str)
         if parsed: duration = parsed
     end_time = datetime.now() + duration if duration else None
     ft = format_time(duration) if duration else "навсегда"
-    
     conn, cur = db()
     try:
         cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000")
         chats = cur.fetchall()
         user_name = await get_user_name(uid)
-        
         for (peer_id,) in chats:
             try:
                 cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at, reason, banned_by) VALUES (%s,%s,'ban',%s,%s,%s)", (uid, peer_id, end_time, reason, msg.from_id))
                 await kick_user(peer_id, uid)
             except: pass
-        
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📝 {reason}\n📊 Все беседы ({len(chats)})")
     finally: conn.close()
 
 @bot.on.message(text="/globalunban <target_id>")
 async def globalunban_cmd(msg: Message, target_id: str):
     if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
     try: uid = int(target_id)
     except: return await msg.answer("❌ ID должен быть числом")
-    
     conn, cur = db()
     try:
         cur.execute("DELETE FROM punishments WHERE user_id=%s AND type='ban'", (uid,))
@@ -398,27 +386,22 @@ async def globalunban_cmd(msg: Message, target_id: str):
 @bot.on.message(text="/broadcast <text>")
 async def broadcast_cmd(msg: Message, text: str):
     if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
     conn, cur = db()
     try:
         cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000")
         chats = cur.fetchall()
-        
         for (peer_id,) in chats:
             try:
                 await bot.api.messages.send(peer_id=peer_id, message=f"📢 РАССЫЛКА\n\n{text}", random_id=0)
             except: pass
-        
         await msg.answer(f"📢 Рассылка отправлена в {len(chats)} бесед")
     finally: conn.close()
 
 @bot.on.message(text="/sendto <peer> <text>")
 async def sendto_cmd(msg: Message, peer: str, text: str):
     if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
     try: peer_id = int(peer)
     except: return await msg.answer("❌ ID беседы должен быть числом")
-    
     try:
         await bot.api.messages.send(peer_id=peer_id, message=f"📢 СООБЩЕНИЕ ОТ ВЛАДЕЛЬЦА\n\n{text}", random_id=0)
         await msg.answer(f"✅ Отправлено в беседу {peer_id}")
@@ -475,14 +458,7 @@ async def setcmd(msg: Message, cmd_name: str, priority: str):
         try: p = int(priority)
         except: return await msg.answer("❌ Приоритет - число")
         if p < 0 or p > 1000: return await msg.answer("❌ Приоритет от 0 до 1000")
-        
-        cur.execute("""
-        INSERT INTO cmd_permissions (peer_id, cmd_name, required_role)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (peer_id, cmd_name) 
-        DO UPDATE SET required_role = EXCLUDED.required_role
-        """, (msg.peer_id, cmd_name.lower(), p))
-        
+        cur.execute("INSERT INTO cmd_permissions (peer_id, cmd_name, required_role) VALUES (%s,%s,%s) ON CONFLICT (peer_id, cmd_name) DO UPDATE SET required_role = EXCLUDED.required_role", (msg.peer_id, cmd_name.lower(), p))
         await msg.answer(f"✅ /{cmd_name.lower()} - роль {p}+")
     finally: conn.close()
 
@@ -514,12 +490,7 @@ async def gsetcmd_cmd(msg: Message, cmd_name: str, priority: str):
         chats = get_group_chats(cur, group_id)
         for peer_id in chats:
             try:
-                cur.execute("""
-                INSERT INTO cmd_permissions (peer_id, cmd_name, required_role)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (peer_id, cmd_name) 
-                DO UPDATE SET required_role = EXCLUDED.required_role
-                """, (peer_id, cmd_name.lower(), p))
+                cur.execute("INSERT INTO cmd_permissions (peer_id, cmd_name, required_role) VALUES (%s,%s,%s) ON CONFLICT (peer_id, cmd_name) DO UPDATE SET required_role = EXCLUDED.required_role", (peer_id, cmd_name.lower(), p))
             except: pass
         await msg.answer(f"🌐 ГЛОБАЛЬНАЯ НАСТРОЙКА\n/{cmd_name.lower()} - роль {p}+\n📊 {len(chats)} бесед")
     finally: conn.close()
@@ -699,6 +670,42 @@ async def process_gban(msg: Message, target: str, time_str: str, reason: str):
                 await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📝 {final_reason}", random_id=0)
             except: pass
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📊 {len(chats)} бесед")
+    finally: conn.close()
+
+# =========================
+# GUNBAN
+# =========================
+@bot.on.message(text="/gunban")
+async def gunban_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        req = get_cmd_required_role(cur, msg.peer_id, 'gunban')
+        return await msg.answer(f"🌐 /gunban @user\nГлобальный разбан во всех беседах объединения\nТребуется роль {req}+")
+    finally: conn.close()
+
+@bot.on.message(text="/gunban <target>")
+async def gunban_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'gunban')
+        if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
+        group_id = get_group_id(cur, msg.peer_id)
+        if not group_id: return await msg.answer("❌ Беседа не привязана к объединению")
+        uid = get_target_id(msg)
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
+        if not uid: return await msg.answer("❌ Пользователь не найден")
+        if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
+            return await msg.answer("❌ Нельзя разбанить равного или высшего")
+        chats = get_group_chats(cur, group_id)
+        user_name = await get_user_name(uid)
+        for peer_id in chats:
+            try:
+                cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban'", (uid, peer_id))
+                await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНЫЙ РАЗБАН\n👤 {user_name}", random_id=0)
+            except: pass
+        await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ РАЗБАН\n👤 {user_name}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
 # =========================
