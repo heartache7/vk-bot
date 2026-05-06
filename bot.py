@@ -287,7 +287,7 @@ async def help_cmd(msg: Message):
         "🌐 ОБЪЕДИНЕНИЯ:\n"
         "/creategroup /setgroup /leavegroup /groups\n"
         "/gban /gkick /ggiverole /gremoverole /gzov /gsnick /grnick /gsetcmd\n"
-        "📊 /stats\n⚙️ /setcmd /gsetcmd\n👑 /sysrole"
+        "📊 /stats\n⚙️ /setcmd"
     )
 
 # =========================
