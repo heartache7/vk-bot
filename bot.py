@@ -212,30 +212,23 @@ def role_exists(cur, peer_id, priority):
     return cur.fetchone() is not None
 
 def get_cmd_required_role(cur, peer_id, cmd_name):
-    """Получает требуемую роль для команды. СНАЧАЛА проверяет локальную настройку беседы, ПОТОМ глобальную."""
-    # Проверяем локальную настройку беседы
+    """Получает требуемую роль: СНАЧАЛА локальная настройка беседы, ПОТОМ глобальная"""
     cur.execute("SELECT required_role FROM cmd_permissions WHERE peer_id=%s AND cmd_name=%s", (peer_id, cmd_name))
     res = cur.fetchone()
     if res is not None:
         return res[0]
-    
-    # Проверяем глобальную настройку
     cur.execute("SELECT required_role FROM cmd_permissions WHERE peer_id=0 AND cmd_name=%s", (cmd_name,))
     res = cur.fetchone()
     if res is not None:
         return res[0]
-    
-    # Если настройки нет вообще - запрещаем
     return 999999
 
 def check_permission(cur, peer_id, user_id, cmd_name):
-    """Проверяет права на команду. Возвращает (разрешено, роль_юзера, требуемая_роль)"""
+    """Проверяет права на команду"""
     if user_id == OWNER_ID:
         return True, 0, 0
-    
     user_role = get_user_role(cur, peer_id, user_id)
     required_role = get_cmd_required_role(cur, peer_id, cmd_name)
-    
     return user_role >= required_role, user_role, required_role
 
 def can_punish(cur, peer_id, punisher_id, target_id):
@@ -328,53 +321,37 @@ async def admin_panel(msg: Message):
             f"👥 Пользователей: {total_users}\n"
             f"🚫 Активных банов: {active_bans}\n"
             f"🌐 Объединений: {total_groups}\n\n"
-            f"📋 Команды админ-панели:\n"
-            f"/globalban [id] [время] [причина] - бан везде\n"
-            f"/globalunban [id] - разбан везде\n"
-            f"/broadcast [текст] - рассылка\n"
+            f"📋 Команды:\n"
+            f"/globalban [id] [время] [причина]\n"
+            f"/globalunban [id]\n"
+            f"/broadcast [текст]\n"
             f"/adminchats - список бесед\n"
-            f"/adminhelp - помощь по админ-панели\n"
+            f"/adminhelp - помощь\n"
             f"/admin - эта панель"
         )
     finally: conn.close()
 
 @bot.on.message(text="/adminhelp")
 async def admin_help(msg: Message):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
-    
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
     await msg.answer(
-        "👑 АДМИН-ПАНЕЛЬ FLEX BOT - ПОМОЩЬ\n\n"
-        "📋 КОМАНДЫ:\n\n"
+        "👑 АДМИН-ПАНЕЛЬ\n\n"
         "/admin - главная панель\n"
-        "/adminhelp - эта помощь\n"
-        "/adminchats - список всех бесед бота\n\n"
-        "🌐 ГЛОБАЛЬНЫЕ ДЕЙСТВИЯ:\n"
-        "/globalban [id] [время] [причина]\n"
-        "  Пример: /globalban 123456789 1d спам\n"
-        "  Банит пользователя во ВСЕХ беседах\n\n"
-        "/globalunban [id]\n"
-        "  Пример: /globalunban 123456789\n"
-        "  Разбанивает пользователя во ВСЕХ беседах\n\n"
-        "/broadcast [текст]\n"
-        "  Пример: /broadcast Всем привет!\n"
-        "  Отправляет сообщение во ВСЕ беседы\n\n"
-        "📊 РАССЫЛКА В БЕСЕДУ:\n"
-        "/sendto [peer_id] [текст]\n"
-        "  Пример: /sendto 2000000001 Привет!\n"
-        "  Отправляет сообщение в конкретную беседу"
+        "/adminchats - список бесед\n"
+        "/globalban [id] [время] [причина] - бан везде\n"
+        "/globalunban [id] - разбан везде\n"
+        "/broadcast [текст] - рассылка во все беседы\n"
+        "/sendto [peer_id] [текст] - сообщение в конкретную беседу"
     )
 
 @bot.on.message(text="/adminchats")
 async def admin_chats(msg: Message):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
     
     conn, cur = db()
     try:
         cur.execute("SELECT COUNT(DISTINCT peer_id) FROM users WHERE peer_id > 2000000000")
         total = cur.fetchone()[0]
-        
         cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000 ORDER BY peer_id")
         chats = cur.fetchall()
         
@@ -391,8 +368,7 @@ async def admin_chats(msg: Message):
 
 @bot.on.message(text="/globalban <target_id> <time_str> <reason>")
 async def globalban_cmd(msg: Message, target_id: str, time_str: str, reason: str):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
     
     try: uid = int(target_id)
     except: return await msg.answer("❌ ID должен быть числом")
@@ -421,8 +397,7 @@ async def globalban_cmd(msg: Message, target_id: str, time_str: str, reason: str
 
 @bot.on.message(text="/globalunban <target_id>")
 async def globalunban_cmd(msg: Message, target_id: str):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
     
     try: uid = int(target_id)
     except: return await msg.answer("❌ ID должен быть числом")
@@ -435,8 +410,7 @@ async def globalunban_cmd(msg: Message, target_id: str):
 
 @bot.on.message(text="/broadcast <text>")
 async def broadcast_cmd(msg: Message, text: str):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
     
     conn, cur = db()
     try:
@@ -453,8 +427,7 @@ async def broadcast_cmd(msg: Message, text: str):
 
 @bot.on.message(text="/sendto <peer> <text>")
 async def sendto_cmd(msg: Message, peer: str, text: str):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
     
     try: peer_id = int(peer)
     except: return await msg.answer("❌ ID беседы должен быть числом")
@@ -487,7 +460,7 @@ async def start(msg: Message):
     finally: conn.close()
 
 # =========================
-# SETCMD (ИСПРАВЛЕНО!)
+# SETCMD (ИСПРАВЛЕНО)
 # =========================
 @bot.on.message(text="/setcmd")
 async def setcmd_help(msg: Message):
@@ -516,24 +489,18 @@ async def setcmd(msg: Message, cmd_name: str, priority: str):
         except: return await msg.answer("❌ Приоритет - число")
         if p < 0 or p > 1000: return await msg.answer("❌ Приоритет от 0 до 1000")
         
-        # Сохраняем локальную настройку для ЭТОЙ беседы
         cur.execute("""
         INSERT INTO cmd_permissions (peer_id, cmd_name, required_role)
         VALUES (%s, %s, %s)
         ON CONFLICT (peer_id, cmd_name) 
         DO UPDATE SET required_role = EXCLUDED.required_role
-        """, (msg.peer_id, cmd_name.lower(), p, p))
+        """, (msg.peer_id, cmd_name.lower(), p))
         
-        # Проверяем что сохранилось
-        cur.execute("SELECT required_role FROM cmd_permissions WHERE peer_id=%s AND cmd_name=%s", (msg.peer_id, cmd_name.lower()))
-        saved = cur.fetchone()
-        logger.info(f"SETCMD: {cmd_name.lower()} set to {p} for peer {msg.peer_id}, saved={saved[0] if saved else 'NOT FOUND'}")
-        
-        await msg.answer(f"✅ /{cmd_name.lower()} - роль {p}+ (локально)")
+        await msg.answer(f"✅ /{cmd_name.lower()} - роль {p}+")
     finally: conn.close()
 
 # =========================
-# GSETCMD
+# GSETCMD (ИСПРАВЛЕНО)
 # =========================
 @bot.on.message(text="/gsetcmd")
 async def gsetcmd_help(msg: Message):
@@ -541,7 +508,7 @@ async def gsetcmd_help(msg: Message):
     conn, cur = db()
     try:
         req = get_cmd_required_role(cur, msg.peer_id, 'gsetcmd')
-        return await msg.answer(f"🌐 /gsetcmd [команда] [приоритет]\nГлобальная настройка прав во всех беседах объединения\nТребуется роль {req}+")
+        return await msg.answer(f"🌐 /gsetcmd [команда] [приоритет]\nТребуется роль {req}+")
     finally: conn.close()
 
 @bot.on.message(text="/gsetcmd <cmd_name> <priority>")
@@ -565,7 +532,7 @@ async def gsetcmd_cmd(msg: Message, cmd_name: str, priority: str):
                 VALUES (%s, %s, %s)
                 ON CONFLICT (peer_id, cmd_name) 
                 DO UPDATE SET required_role = EXCLUDED.required_role
-                """, (peer_id, cmd_name.lower(), p, p))
+                """, (peer_id, cmd_name.lower(), p))
             except: pass
         await msg.answer(f"🌐 ГЛОБАЛЬНАЯ НАСТРОЙКА\n/{cmd_name.lower()} - роль {p}+\n📊 {len(chats)} бесед")
     finally: conn.close()
