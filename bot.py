@@ -110,7 +110,6 @@ def init():
                 created_at TIMESTAMP DEFAULT NOW()
             );""")
 
-            # Принудительно обновляем права для /log
             cur.execute("""
             INSERT INTO cmd_permissions (peer_id, cmd_name, required_role)
             VALUES (0, 'log', 70)
@@ -168,7 +167,6 @@ def init():
 
 init()
 
-# Ранги должностей для иерархии
 BOT_ROLE_RANKS = {
     'Агент Поддержки': 1,
     'Помощник куратора по отделу агентов поддержки': 2,
@@ -177,33 +175,27 @@ BOT_ROLE_RANKS = {
 }
 
 def get_bot_role(cur, user_id):
-    """Получает должность пользователя"""
     cur.execute("SELECT role_name FROM bot_roles WHERE user_id=%s", (user_id,))
     res = cur.fetchone()
     return res[0] if res else None
 
 def get_bot_role_rank(role_name):
-    """Получает ранг должности (чем выше, тем главнее)"""
     return BOT_ROLE_RANKS.get(role_name, 0)
 
 def can_manage_bot_role(giver_role, target_role):
-    """Проверяет, может ли выдающий управлять должностью цели"""
     if target_role is None:
-        return True  # Снятие должности
+        return True
     giver_rank = get_bot_role_rank(giver_role)
     target_rank = get_bot_role_rank(target_role)
-    # Генеральный Директор не может выдавать Генерального Директора
     if giver_role == 'Генеральный Директор' and target_role == 'Генеральный Директор':
         return False
     return giver_rank > target_rank
 
 def can_access_reports(cur, user_id):
-    """Проверяет, имеет ли пользователь доступ к репортам (Агент Поддержки+)"""
     role = get_bot_role(cur, user_id)
     return role is not None and get_bot_role_rank(role) >= 1
 
 def can_manage_agents(cur, user_id):
-    """Проверяет, может ли пользователь управлять Агентами (Помощник куратора+)"""
     role = get_bot_role(cur, user_id)
     return role is not None and get_bot_role_rank(role) >= 2
 
@@ -369,19 +361,23 @@ async def help_cmd(msg: Message):
     )
 
 # =========================
-# BOTROLE (выдача должности, ЛС)
+# BOTROLE
 # =========================
 @bot.on.message(text="/botrole")
 async def botrole_help(msg: Message):
     if msg.peer_id > 2000000000: return
-    if msg.from_id != OWNER_ID and not can_manage_agents(None, msg.from_id):
-        return await msg.answer("❌ У вас нет доступа к этой команде")
+    if msg.from_id != OWNER_ID:
+        conn, cur = db()
+        try:
+            if not can_manage_agents(cur, msg.from_id):
+                return await msg.answer("❌ У вас нет доступа к этой команде")
+        finally: conn.close()
     
     return await msg.answer(
         "🏅 ВЫДАЧА ДОЛЖНОСТИ\n\n"
-        "/botrole @user [должность] - выдать должность\n"
-        "/botrole @user - снять должность\n\n"
-        "📋 Доступные должности:\n"
+        "/botrole @user [должность] - выдать\n"
+        "/botrole @user - снять\n\n"
+        "📋 Должности:\n"
         "• Агент Поддержки\n"
         "• Помощник куратора по отделу агентов поддержки\n"
         "• Куратор по отделу агентов поддержки\n"
@@ -390,7 +386,6 @@ async def botrole_help(msg: Message):
 
 @bot.on.message(text="/botrole <target>")
 async def botrole_remove(msg: Message, target: str):
-    """Снятие должности"""
     if msg.peer_id > 2000000000: return
     
     conn, cur = db()
@@ -400,12 +395,20 @@ async def botrole_remove(msg: Message, target: str):
             return await msg.answer("❌ У вас нет прав на управление должностями")
         
         uid = get_target_id(msg)
-        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
-        if not uid: return await msg.answer("❌ Пользователь не найден")
+        if not uid:
+            clean = target.replace("@", "").replace("[", "").replace("]", "").strip()
+            if clean.isdigit():
+                uid = int(clean)
+            else:
+                uid = await resolve_user_id(clean)
+        
+        if not uid:
+            return await msg.answer("❌ Пользователь не найден\n\n💡 Используйте: /botrole @username или /botrole ID")
         
         target_role = get_bot_role(cur, uid)
         if not target_role:
-            return await msg.answer(f"❌ У пользователя нет должности")
+            user_name = await get_user_name(uid)
+            return await msg.answer(f"❌ У пользователя {user_name} нет должности")
         
         if msg.from_id != OWNER_ID and not can_manage_bot_role(giver_role, target_role):
             return await msg.answer(f"❌ Вы не можете снять должность '{target_role}'")
@@ -417,7 +420,6 @@ async def botrole_remove(msg: Message, target: str):
 
 @bot.on.message(text="/botrole <target> <role_name>")
 async def botrole_give(msg: Message, target: str, role_name: str):
-    """Выдача должности"""
     if msg.peer_id > 2000000000: return
     
     if role_name not in BOT_ROLE_RANKS:
@@ -430,14 +432,17 @@ async def botrole_give(msg: Message, target: str, role_name: str):
             return await msg.answer("❌ У вас нет прав на управление должностями")
         
         uid = get_target_id(msg)
-        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
-        if not uid: return await msg.answer("❌ Пользователь не найден")
+        if not uid:
+            clean = target.replace("@", "").replace("[", "").replace("]", "").strip()
+            if clean.isdigit():
+                uid = int(clean)
+            else:
+                uid = await resolve_user_id(clean)
         
-        # Владелец может всё кроме Генерального Директора
-        if msg.from_id == OWNER_ID:
-            if role_name == 'Генеральный Директор':
-                return await msg.answer("❌ Владелец не может выдать должность Генерального Директора")
-        else:
+        if not uid:
+            return await msg.answer("❌ Пользователь не найден\n\n💡 Используйте: /botrole @username или /botrole ID")
+        
+        if msg.from_id != OWNER_ID:
             if not can_manage_bot_role(giver_role, role_name):
                 return await msg.answer(f"❌ Вы не можете выдать должность '{role_name}'")
         
@@ -452,7 +457,7 @@ async def botrole_give(msg: Message, target: str, role_name: str):
     finally: conn.close()
 
 # =========================
-# BOTROLES (список должностей, ЛС)
+# BOTROLES
 # =========================
 @bot.on.message(text="/botroles")
 async def botroles_list(msg: Message):
@@ -479,7 +484,7 @@ async def botroles_list(msg: Message):
     finally: conn.close()
 
 # =========================
-# REPORTS (ЛС, Агент Поддержки+)
+# REPORTS (ЛС)
 # =========================
 @bot.on.message(text="/reports")
 async def reports_list(msg: Message):
@@ -512,7 +517,7 @@ async def reports_list(msg: Message):
     finally: conn.close()
 
 # =========================
-# REPLYREPORT (ЛС, Агент Поддержки+)
+# REPLYREPORT (ЛС)
 # =========================
 @bot.on.message(text="/replyreport <report_id> <text>")
 async def replyreport_cmd(msg: Message, report_id: str, text: str):
@@ -534,8 +539,8 @@ async def replyreport_cmd(msg: Message, report_id: str, text: str):
         user_id, peer_id = report
         
         sent = False
+        replier_name = await get_user_name(msg.from_id)
         try:
-            replier_name = await get_user_name(msg.from_id)
             await bot.api.messages.send(
                 user_id=user_id,
                 message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
@@ -567,7 +572,7 @@ async def replyreport_cmd(msg: Message, report_id: str, text: str):
     finally: conn.close()
 
 # =========================
-# REPORT (из беседы или ЛС)
+# REPORT
 # =========================
 @bot.on.message(text="/report")
 async def report_help(msg: Message):
@@ -607,7 +612,7 @@ async def report_cmd(msg: Message, description: str):
     finally: conn.close()
 
 # =========================
-# ADMIN PANEL (ЛС, владелец)
+# ADMIN PANEL
 # =========================
 @bot.on.message(text="/admin")
 async def admin_panel(msg: Message):
