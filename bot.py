@@ -115,7 +115,7 @@ def init():
                 ('gban', 50), ('gkick', 50), ('ggiverole', 50), ('gzov', 50),
                 ('gremoverole', 50), ('gsnick', 50), ('grnick', 50),
                 ('gunban', 50), ('gnick', 20), ('getban', 50), ('groups', 100),
-                ('report', 0), ('top', 0), ('activity', 0), ('log', 20)
+                ('report', 0), ('top', 0), ('activity', 0), ('log', 70)
             ]
             
             for cmd, role in default_permissions:
