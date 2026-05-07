@@ -85,11 +85,10 @@ def init():
             cur.execute("""
             CREATE TABLE IF NOT EXISTS reports(
                 id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                peer_id BIGINT,
+                user_id BIGINT, peer_id BIGINT,
                 description TEXT,
                 status TEXT DEFAULT 'open',
-                reply TEXT,
+                reply TEXT, replied_by BIGINT,
                 created_at TIMESTAMP DEFAULT NOW()
             );""")
 
@@ -99,10 +98,25 @@ def init():
                 peer_id BIGINT,
                 moderator_id BIGINT,
                 target_id BIGINT,
-                action TEXT,
-                reason TEXT,
+                action TEXT, reason TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             );""")
+
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_roles(
+                user_id BIGINT PRIMARY KEY,
+                role_name TEXT,
+                given_by BIGINT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );""")
+
+            # Принудительно обновляем права для /log
+            cur.execute("""
+            INSERT INTO cmd_permissions (peer_id, cmd_name, required_role)
+            VALUES (0, 'log', 70)
+            ON CONFLICT (peer_id, cmd_name) 
+            DO UPDATE SET required_role = 70
+            """)
 
             default_permissions = [
                 ('warn', 20), ('mute', 20), ('unmute', 20),
@@ -153,6 +167,45 @@ def init():
         raise
 
 init()
+
+# Ранги должностей для иерархии
+BOT_ROLE_RANKS = {
+    'Агент Поддержки': 1,
+    'Помощник куратора по отделу агентов поддержки': 2,
+    'Куратор по отделу агентов поддержки': 3,
+    'Генеральный Директор': 4
+}
+
+def get_bot_role(cur, user_id):
+    """Получает должность пользователя"""
+    cur.execute("SELECT role_name FROM bot_roles WHERE user_id=%s", (user_id,))
+    res = cur.fetchone()
+    return res[0] if res else None
+
+def get_bot_role_rank(role_name):
+    """Получает ранг должности (чем выше, тем главнее)"""
+    return BOT_ROLE_RANKS.get(role_name, 0)
+
+def can_manage_bot_role(giver_role, target_role):
+    """Проверяет, может ли выдающий управлять должностью цели"""
+    if target_role is None:
+        return True  # Снятие должности
+    giver_rank = get_bot_role_rank(giver_role)
+    target_rank = get_bot_role_rank(target_role)
+    # Генеральный Директор не может выдавать Генерального Директора
+    if giver_role == 'Генеральный Директор' and target_role == 'Генеральный Директор':
+        return False
+    return giver_rank > target_rank
+
+def can_access_reports(cur, user_id):
+    """Проверяет, имеет ли пользователь доступ к репортам (Агент Поддержки+)"""
+    role = get_bot_role(cur, user_id)
+    return role is not None and get_bot_role_rank(role) >= 1
+
+def can_manage_agents(cur, user_id):
+    """Проверяет, может ли пользователь управлять Агентами (Помощник куратора+)"""
+    role = get_bot_role(cur, user_id)
+    return role is not None and get_bot_role_rank(role) >= 2
 
 def parse_time(t):
     if not t: return None
@@ -250,12 +303,10 @@ def can_punish(cur, peer_id, punisher_id, target_id):
     return punisher_role > target_role
 
 def add_log(cur, peer_id, moderator_id, target_id, action, reason=""):
-    """Добавляет запись в лог модерации"""
     try:
         cur.execute("INSERT INTO moderation_logs (peer_id, moderator_id, target_id, action, reason) VALUES (%s,%s,%s,%s,%s)",
                    (peer_id, moderator_id, target_id, action, reason))
-    except:
-        pass
+    except: pass
 
 def get_group_id(cur, peer_id):
     cur.execute("SELECT group_id FROM group_chats WHERE peer_id=%s", (peer_id,))
@@ -318,158 +369,211 @@ async def help_cmd(msg: Message):
     )
 
 # =========================
-# TOP
+# BOTROLE (выдача должности, ЛС)
 # =========================
-@bot.on.message(text="/top")
-async def top_help(msg: Message):
-    if msg.peer_id < 2000000000: return
-    return await msg.answer("📊 /top [количество]\nПоказывает топ по сообщениям\nПример: /top 10")
+@bot.on.message(text="/botrole")
+async def botrole_help(msg: Message):
+    if msg.peer_id > 2000000000: return
+    if msg.from_id != OWNER_ID and not can_manage_agents(None, msg.from_id):
+        return await msg.answer("❌ У вас нет доступа к этой команде")
+    
+    return await msg.answer(
+        "🏅 ВЫДАЧА ДОЛЖНОСТИ\n\n"
+        "/botrole @user [должность] - выдать должность\n"
+        "/botrole @user - снять должность\n\n"
+        "📋 Доступные должности:\n"
+        "• Агент Поддержки\n"
+        "• Помощник куратора по отделу агентов поддержки\n"
+        "• Куратор по отделу агентов поддержки\n"
+        "• Генеральный Директор"
+    )
 
-@bot.on.message(text="/top <count>")
-async def top_cmd(msg: Message, count: str = "10"):
-    if msg.peer_id < 2000000000: return
+@bot.on.message(text="/botrole <target>")
+async def botrole_remove(msg: Message, target: str):
+    """Снятие должности"""
+    if msg.peer_id > 2000000000: return
+    
     conn, cur = db()
     try:
-        try: limit = int(count)
-        except: limit = 10
-        if limit < 1: limit = 1
-        if limit > 50: limit = 50
+        giver_role = get_bot_role(cur, msg.from_id)
+        if msg.from_id != OWNER_ID and not can_manage_agents(cur, msg.from_id):
+            return await msg.answer("❌ У вас нет прав на управление должностями")
         
-        cur.execute("SELECT user_id, msgs FROM users WHERE peer_id=%s AND msgs>0 ORDER BY msgs DESC LIMIT %s", (msg.peer_id, limit))
-        top_users = cur.fetchall()
+        uid = get_target_id(msg)
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
+        if not uid: return await msg.answer("❌ Пользователь не найден")
         
-        if not top_users:
-            return await msg.answer("📊 ТОП ПО СООБЩЕНИЯМ\n\n❌ Нет данных")
+        target_role = get_bot_role(cur, uid)
+        if not target_role:
+            return await msg.answer(f"❌ У пользователя нет должности")
         
-        text = f"📊 ТОП {limit} ПО СООБЩЕНИЯМ\n\n"
-        medals = ["🥇", "🥈", "🥉"]
+        if msg.from_id != OWNER_ID and not can_manage_bot_role(giver_role, target_role):
+            return await msg.answer(f"❌ Вы не можете снять должность '{target_role}'")
         
-        for i, (user_id, msgs) in enumerate(top_users):
+        cur.execute("DELETE FROM bot_roles WHERE user_id=%s", (uid,))
+        user_name = await get_user_name(uid)
+        await msg.answer(f"🏅 ДОЛЖНОСТЬ СНЯТА\n👤 {user_name}\n❌ Была: {target_role}")
+    finally: conn.close()
+
+@bot.on.message(text="/botrole <target> <role_name>")
+async def botrole_give(msg: Message, target: str, role_name: str):
+    """Выдача должности"""
+    if msg.peer_id > 2000000000: return
+    
+    if role_name not in BOT_ROLE_RANKS:
+        return await msg.answer(f"❌ Неизвестная должность\n\nДоступные: {', '.join(BOT_ROLE_RANKS.keys())}")
+    
+    conn, cur = db()
+    try:
+        giver_role = get_bot_role(cur, msg.from_id)
+        if msg.from_id != OWNER_ID and not can_manage_agents(cur, msg.from_id):
+            return await msg.answer("❌ У вас нет прав на управление должностями")
+        
+        uid = get_target_id(msg)
+        if not uid: uid = await resolve_user_id(target.replace("@", "").strip())
+        if not uid: return await msg.answer("❌ Пользователь не найден")
+        
+        # Владелец может всё кроме Генерального Директора
+        if msg.from_id == OWNER_ID:
+            if role_name == 'Генеральный Директор':
+                return await msg.answer("❌ Владелец не может выдать должность Генерального Директора")
+        else:
+            if not can_manage_bot_role(giver_role, role_name):
+                return await msg.answer(f"❌ Вы не можете выдать должность '{role_name}'")
+        
+        cur.execute("""
+        INSERT INTO bot_roles (user_id, role_name, given_by)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET role_name=%s, given_by=%s
+        """, (uid, role_name, msg.from_id, role_name, msg.from_id))
+        
+        user_name = await get_user_name(uid)
+        await msg.answer(f"🏅 ДОЛЖНОСТЬ ВЫДАНА\n👤 {user_name}\n📋 {role_name}")
+    finally: conn.close()
+
+# =========================
+# BOTROLES (список должностей, ЛС)
+# =========================
+@bot.on.message(text="/botroles")
+async def botroles_list(msg: Message):
+    if msg.peer_id > 2000000000: return
+    
+    conn, cur = db()
+    try:
+        if msg.from_id != OWNER_ID and not can_manage_agents(cur, msg.from_id):
+            return await msg.answer("❌ У вас нет доступа")
+        
+        cur.execute("SELECT user_id, role_name FROM bot_roles ORDER BY role_name")
+        roles = cur.fetchall()
+        
+        if not roles:
+            return await msg.answer("🏅 ДОЛЖНОСТИ\n\n❌ Нет назначенных должностей")
+        
+        text = "🏅 ДОЛЖНОСТИ:\n\n"
+        for user_id, role_name in roles:
             try: name = await get_user_name(user_id)
             except: name = f"id{user_id}"
-            
-            if i < 3:
-                prefix = medals[i]
-            else:
-                prefix = f"{i+1}."
-            
-            text += f"{prefix} {name} — {msgs} сообщений\n"
+            text += f"👤 {name} — {role_name}\n"
         
         await msg.answer(text)
     finally: conn.close()
 
 # =========================
-# ACTIVITY
+# REPORTS (ЛС, Агент Поддержки+)
 # =========================
-@bot.on.message(text="/activity")
-async def activity_help(msg: Message):
-    if msg.peer_id < 2000000000: return
-    return await msg.answer("📈 /activity - активность за сегодня\n/activity week - за неделю")
-
-@bot.on.message(text="/activity")
-async def activity_today(msg: Message):
-    if msg.peer_id < 2000000000: return
+@bot.on.message(text="/reports")
+async def reports_list(msg: Message):
+    if msg.peer_id > 2000000000: return
+    
     conn, cur = db()
     try:
-        # За сегодня
-        cur.execute("""
-        SELECT COUNT(*) FROM users WHERE peer_id=%s 
-        AND msgs > 0
-        """, (msg.peer_id,))
-        active_today = cur.fetchone()[0]
+        if msg.from_id != OWNER_ID and not can_access_reports(cur, msg.from_id):
+            return await msg.answer("❌ У вас нет доступа к репортам")
         
-        cur.execute("SELECT SUM(msgs) FROM users WHERE peer_id=%s", (msg.peer_id,))
-        total_msgs = cur.fetchone()[0] or 0
+        cur.execute("SELECT id, user_id, description, created_at FROM reports WHERE status='open' ORDER BY id")
+        reports = cur.fetchall()
         
-        cur.execute("SELECT user_id, msgs FROM users WHERE peer_id=%s ORDER BY msgs DESC LIMIT 1", (msg.peer_id,))
-        top_user = cur.fetchone()
+        if not reports:
+            return await msg.answer("📋 РЕПОРТЫ\n\n✅ Нет открытых репортов")
         
-        text = "📈 АКТИВНОСТЬ БЕСЕДЫ\n\n"
-        text += f"👥 Участников с сообщениями: {active_today}\n"
-        text += f"💬 Всего сообщений: {total_msgs}\n"
+        text = f"📋 ОТКРЫТЫЕ РЕПОРТЫ ({len(reports)}):\n\n"
+        for rid, user_id, desc, created_at in reports:
+            try: user_name = await get_user_name(user_id)
+            except: user_name = f"id{user_id}"
+            date_str = created_at.strftime('%d.%m в %H:%M') if created_at else "Неизвестно"
+            short_desc = desc[:50] + "..." if len(desc) > 50 else desc
+            text += f"🐛 #{rid} | {user_name}\n   📝 {short_desc}\n   📅 {date_str}\n   💡 /replyreport {rid} [ответ]\n\n"
         
-        if top_user:
-            try: name = await get_user_name(top_user[0])
-            except: name = f"id{top_user[0]}"
-            text += f"🔥 Самый активный: {name} ({top_user[1]} сообщений)\n"
-        
-        await msg.answer(text)
+        if len(text) > 4000:
+            for i in range(0, len(text), 4000):
+                await msg.answer(text[i:i+4000])
+        else:
+            await msg.answer(text)
     finally: conn.close()
 
-@bot.on.message(text="/activity week")
-async def activity_week(msg: Message):
-    if msg.peer_id < 2000000000: return
+# =========================
+# REPLYREPORT (ЛС, Агент Поддержки+)
+# =========================
+@bot.on.message(text="/replyreport <report_id> <text>")
+async def replyreport_cmd(msg: Message, report_id: str, text: str):
+    if msg.peer_id > 2000000000: return
+    
     conn, cur = db()
     try:
-        week_ago = datetime.now() - timedelta(days=7)
+        if msg.from_id != OWNER_ID and not can_access_reports(cur, msg.from_id):
+            return await msg.answer("❌ У вас нет доступа к репортам")
         
-        cur.execute("SELECT COUNT(*) FROM moderation_logs WHERE peer_id=%s AND created_at > %s", (msg.peer_id, week_ago))
-        actions = cur.fetchone()[0]
+        try: rid = int(report_id)
+        except: return await msg.answer("❌ Номер репорта должен быть числом\n\nПример: /replyreport 1 Ваш ответ")
         
-        cur.execute("SELECT COUNT(*) FROM punishments WHERE peer_id=%s AND created_at > %s", (msg.peer_id, week_ago))
-        punishments = cur.fetchone()[0]
+        cur.execute("SELECT user_id, peer_id FROM reports WHERE id=%s AND status='open'", (rid,))
+        report = cur.fetchone()
+        if not report:
+            return await msg.answer(f"❌ Репорт #{rid} не найден или уже отвечен")
         
-        text = "📈 АКТИВНОСТЬ ЗА НЕДЕЛЮ\n\n"
-        text += f"🛡 Действий модерации: {actions}\n"
-        text += f"⚠️ Наказаний: {punishments}\n"
-        text += f"📅 с {week_ago.strftime('%d.%m')} по {datetime.now().strftime('%d.%m')}\n"
+        user_id, peer_id = report
         
-        await msg.answer(text)
+        sent = False
+        try:
+            replier_name = await get_user_name(msg.from_id)
+            await bot.api.messages.send(
+                user_id=user_id,
+                message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
+                       f"👤 {replier_name} ответил:\n\n{text}\n\n"
+                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}",
+                random_id=0
+            )
+            sent = True
+        except: pass
+        
+        if not sent and peer_id > 2000000000:
+            try:
+                await bot.api.messages.send(
+                    peer_id=peer_id,
+                    message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
+                           f"👤 @id{user_id}\n👤 Ответил: {replier_name}\n\n{text}\n\n"
+                           f"💡 Откройте ЛС для бота чтобы получать ответы там.",
+                    random_id=0
+                )
+                sent = True
+            except: pass
+        
+        cur.execute("UPDATE reports SET status='closed', reply=%s, replied_by=%s WHERE id=%s", (text, msg.from_id, rid))
+        
+        if sent:
+            await msg.answer(f"✅ Ответ на репорт #{rid} отправлен")
+        else:
+            await msg.answer(f"⚠️ Ответ сохранён, но не удалось отправить (ЛС закрыты)")
     finally: conn.close()
 
 # =========================
-# LOG
-# =========================
-@bot.on.message(text="/log")
-async def log_help(msg: Message):
-    if msg.peer_id < 2000000000: return
-    return await msg.answer("📝 /log [количество] - последние логи\n/log @user - логи пользователя\nПример: /log 10")
-
-@bot.on.message(text="/log <count>")
-async def log_cmd(msg: Message, count: str = "10"):
-    if msg.peer_id < 2000000000: return
-    conn, cur = db()
-    try:
-        try: limit = int(count)
-        except: limit = 10
-        if limit < 1: limit = 1
-        if limit > 50: limit = 50
-        
-        cur.execute("""
-        SELECT moderator_id, target_id, action, reason, created_at 
-        FROM moderation_logs WHERE peer_id=%s 
-        ORDER BY id DESC LIMIT %s
-        """, (msg.peer_id, limit))
-        
-        logs = cur.fetchall()
-        
-        if not logs:
-            return await msg.answer("📝 ЛОГИ МОДЕРАЦИИ\n\n❌ Нет записей")
-        
-        text = f"📝 ЛОГИ МОДЕРАЦИИ (последние {len(logs)}):\n\n"
-        
-        for i, (mod_id, target_id, action, reason, created_at) in enumerate(logs, 1):
-            try: mod_name = await get_user_name(mod_id)
-            except: mod_name = f"id{mod_id}"
-            try: target_name = await get_user_name(target_id)
-            except: target_name = f"id{target_id}"
-            
-            time_str = created_at.strftime('%H:%M') if created_at else "?"
-            reason_str = f" — {reason}" if reason else ""
-            
-            text += f"{i}. {mod_name} {action} {target_name}{reason_str} | {time_str}\n"
-        
-        await msg.answer(text)
-    finally: conn.close()
-
-# =========================
-# REPORT
+# REPORT (из беседы или ЛС)
 # =========================
 @bot.on.message(text="/report")
 async def report_help(msg: Message):
     return await msg.answer(
         "🐛 /report [описание]\n\n"
-        "Отправляет сообщение о баге владельцу бота\n"
+        "Отправляет сообщение о баге\n"
         "Пример: /report Не работает команда /ban\n"
         "Минимум 10 символов, максимум 500"
     )
@@ -494,9 +598,7 @@ async def report_cmd(msg: Message, description: str):
                 message=f"🐛 НОВЫЙ РЕПОРТ #{report_id}\n\n"
                        f"👤 От: {reporter_name} (id{msg.from_id})\n"
                        f"📝 {description}\n"
-                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
-                       f"💡 Ответить: /replyreport {report_id} [текст]\n"
-                       f"📋 Все репорты: /reports",
+                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}",
                 random_id=0
             )
         except: pass
@@ -505,89 +607,7 @@ async def report_cmd(msg: Message, description: str):
     finally: conn.close()
 
 # =========================
-# REPORTS (список, только владелец)
-# =========================
-@bot.on.message(text="/reports")
-async def reports_list(msg: Message):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
-    conn, cur = db()
-    try:
-        cur.execute("SELECT id, user_id, description, created_at FROM reports WHERE status='open' ORDER BY id")
-        reports = cur.fetchall()
-        
-        if not reports:
-            return await msg.answer("📋 РЕПОРТЫ\n\n✅ Нет открытых репортов")
-        
-        text = f"📋 ОТКРЫТЫЕ РЕПОРТЫ ({len(reports)}):\n\n"
-        for rid, user_id, desc, created_at in reports:
-            try: user_name = await get_user_name(user_id)
-            except: user_name = f"id{user_id}"
-            date_str = created_at.strftime('%d.%m в %H:%M') if created_at else "Неизвестно"
-            short_desc = desc[:50] + "..." if len(desc) > 50 else desc
-            text += f"🐛 #{rid} | {user_name}\n   📝 {short_desc}\n   📅 {date_str}\n   💡 /replyreport {rid} [ответ]\n\n"
-        
-        if len(text) > 4000:
-            for i in range(0, len(text), 4000):
-                await msg.answer(text[i:i+4000])
-        else:
-            await msg.answer(text)
-    finally: conn.close()
-
-# =========================
-# REPLYREPORT
-# =========================
-@bot.on.message(text="/replyreport <report_id> <text>")
-async def replyreport_cmd(msg: Message, report_id: str, text: str):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
-    try: rid = int(report_id)
-    except: return await msg.answer("❌ Номер репорта должен быть числом\n\nПример: /replyreport 1 Ваш ответ")
-    
-    conn, cur = db()
-    try:
-        cur.execute("SELECT user_id, peer_id FROM reports WHERE id=%s AND status='open'", (rid,))
-        report = cur.fetchone()
-        
-        if not report:
-            return await msg.answer(f"❌ Репорт #{rid} не найден или уже отвечен")
-        
-        user_id, peer_id = report
-        
-        sent = False
-        try:
-            await bot.api.messages.send(
-                user_id=user_id,
-                message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
-                       f"👑 Владелец бота ответил:\n\n{text}\n\n"
-                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}",
-                random_id=0
-            )
-            sent = True
-        except: pass
-        
-        if not sent and peer_id > 2000000000:
-            try:
-                await bot.api.messages.send(
-                    peer_id=peer_id,
-                    message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
-                           f"👤 @id{user_id}\n👑 Владелец ответил:\n\n{text}\n\n"
-                           f"💡 Откройте ЛС для бота чтобы получать ответы там.",
-                    random_id=0
-                )
-                sent = True
-            except: pass
-        
-        cur.execute("UPDATE reports SET status='closed', reply=%s WHERE id=%s", (text, rid))
-        
-        if sent:
-            await msg.answer(f"✅ Ответ на репорт #{rid} отправлен")
-        else:
-            await msg.answer(f"⚠️ Ответ сохранён, но не удалось отправить (ЛС закрыты)")
-    finally: conn.close()
-
-# =========================
-# ADMIN PANEL
+# ADMIN PANEL (ЛС, владелец)
 # =========================
 @bot.on.message(text="/admin")
 async def admin_panel(msg: Message):
@@ -604,6 +624,8 @@ async def admin_panel(msg: Message):
         total_groups = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM reports WHERE status='open'")
         open_reports = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM bot_roles")
+        total_bot_roles = cur.fetchone()[0]
         await msg.answer(
             f"👑 АДМИН-ПАНЕЛЬ FLEX BOT\n\n"
             f"📊 Статистика:\n"
@@ -611,13 +633,16 @@ async def admin_panel(msg: Message):
             f"👥 Пользователей: {total_users}\n"
             f"🚫 Активных банов: {active_bans}\n"
             f"🌐 Объединений: {total_groups}\n"
-            f"🐛 Открытых репортов: {open_reports}\n\n"
+            f"🐛 Открытых репортов: {open_reports}\n"
+            f"🏅 Должностей выдано: {total_bot_roles}\n\n"
             f"📋 Команды:\n"
             f"/globalban [id] [время] [причина]\n"
             f"/globalunban [id]\n"
             f"/broadcast [текст]\n"
             f"/reports - список репортов\n"
             f"/replyreport [номер] [текст]\n"
+            f"/botrole @user [должность]\n"
+            f"/botroles - список должностей\n"
             f"/adminchats - список бесед\n"
             f"/adminhelp - помощь"
         )
@@ -635,6 +660,8 @@ async def admin_help(msg: Message):
         "/broadcast [текст] - рассылка\n"
         "/reports - открытые репорты\n"
         "/replyreport [номер] [текст] - ответ\n"
+        "/botrole @user [должность] - выдать должность\n"
+        "/botroles - список должностей\n"
         "/sendto [peer_id] [текст] - в беседу"
     )
 
@@ -748,7 +775,7 @@ async def start(msg: Message):
     finally: conn.close()
 
 # =========================
-# SETCMD / GSETCMD / GROUPS / CREATEGROUP / SETGROUP / LEAVEGROUP
+# SETCMD / GSETCMD
 # =========================
 @bot.on.message(text="/setcmd")
 async def setcmd_help(msg: Message):
@@ -810,6 +837,9 @@ async def gsetcmd_cmd(msg: Message, cmd_name: str, priority: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНАЯ НАСТРОЙКА\n/{cmd_name.lower()} - роль {p}+\n📊 {len(chats)} бесед")
     finally: conn.close()
 
+# =========================
+# GROUPS
+# =========================
 @bot.on.message(text="/groups")
 async def groups_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -855,6 +885,9 @@ async def groups_list(msg: Message):
         await msg.answer(text)
     finally: conn.close()
 
+# =========================
+# CREATEGROUP / SETGROUP / LEAVEGROUP
+# =========================
 @bot.on.message(text="/creategroup")
 async def creategroup_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -1820,8 +1853,120 @@ async def stats_cmd(msg: Message, target: str = ""):
         name = await get_user_name(uid)
         status = "🚫 БАН" if is_user_banned(msg.peer_id, uid) else "🔇 МУТ" if is_user_muted(msg.peer_id, uid) else "✅ Ок"
         role_display = get_role_name(cur, msg.peer_id, role)
-        text = f"📊 {name}\n📊 {status}\n🎖️ Роль: {role_display}\n💬 Сообщений: {msgs}\n⚠️ Варнов: {warns}/3"
+        bot_role = get_bot_role(cur, uid)
+        text = f"📊 {name}\n📊 {status}\n🎖️ Роль: {role_display}\n"
+        if bot_role:
+            text += f"🏅 Должность: {bot_role}\n"
+        text += f"💬 Сообщений: {msgs}\n⚠️ Варнов: {warns}/3"
         if nick: text += f"\n🏷 Ник: {nick}"
+        await msg.answer(text)
+    finally: conn.close()
+
+# =========================
+# TOP / ACTIVITY / LOG
+# =========================
+@bot.on.message(text="/top")
+async def top_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    return await msg.answer("📊 /top [количество]\nПоказывает топ по сообщениям\nПример: /top 10")
+
+@bot.on.message(text="/top <count>")
+async def top_cmd(msg: Message, count: str = "10"):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        try: limit = int(count)
+        except: limit = 10
+        if limit < 1: limit = 1
+        if limit > 50: limit = 50
+        cur.execute("SELECT user_id, msgs FROM users WHERE peer_id=%s AND msgs>0 ORDER BY msgs DESC LIMIT %s", (msg.peer_id, limit))
+        top_users = cur.fetchall()
+        if not top_users: return await msg.answer("📊 ТОП ПО СООБЩЕНИЯМ\n\n❌ Нет данных")
+        text = f"📊 ТОП {limit} ПО СООБЩЕНИЯМ\n\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (user_id, msgs) in enumerate(top_users):
+            try: name = await get_user_name(user_id)
+            except: name = f"id{user_id}"
+            prefix = medals[i] if i < 3 else f"{i+1}."
+            text += f"{prefix} {name} — {msgs} сообщений\n"
+        await msg.answer(text)
+    finally: conn.close()
+
+@bot.on.message(text="/activity")
+async def activity_today(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        cur.execute("SELECT COUNT(*) FROM users WHERE peer_id=%s AND msgs>0", (msg.peer_id,))
+        active_today = cur.fetchone()[0]
+        cur.execute("SELECT SUM(msgs) FROM users WHERE peer_id=%s", (msg.peer_id,))
+        total_msgs = cur.fetchone()[0] or 0
+        cur.execute("SELECT user_id, msgs FROM users WHERE peer_id=%s ORDER BY msgs DESC LIMIT 1", (msg.peer_id,))
+        top_user = cur.fetchone()
+        text = "📈 АКТИВНОСТЬ БЕСЕДЫ\n\n"
+        text += f"👥 Участников с сообщениями: {active_today}\n"
+        text += f"💬 Всего сообщений: {total_msgs}\n"
+        if top_user:
+            try: name = await get_user_name(top_user[0])
+            except: name = f"id{top_user[0]}"
+            text += f"🔥 Самый активный: {name} ({top_user[1]} сообщений)\n"
+        await msg.answer(text)
+    finally: conn.close()
+
+@bot.on.message(text="/activity week")
+async def activity_week(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        week_ago = datetime.now() - timedelta(days=7)
+        cur.execute("SELECT COUNT(*) FROM moderation_logs WHERE peer_id=%s AND created_at > %s", (msg.peer_id, week_ago))
+        actions = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM punishments WHERE peer_id=%s AND created_at > %s", (msg.peer_id, week_ago))
+        punishments = cur.fetchone()[0]
+        text = "📈 АКТИВНОСТЬ ЗА НЕДЕЛЮ\n\n"
+        text += f"🛡 Действий модерации: {actions}\n"
+        text += f"⚠️ Наказаний: {punishments}\n"
+        text += f"📅 с {week_ago.strftime('%d.%m')} по {datetime.now().strftime('%d.%m')}\n"
+        await msg.answer(text)
+    finally: conn.close()
+
+@bot.on.message(text="/log")
+async def log_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'log')
+        if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
+        return await msg.answer("📝 /log [количество] - последние логи\nПример: /log 10")
+    finally: conn.close()
+
+@bot.on.message(text="/log <count>")
+async def log_cmd(msg: Message, count: str = "10"):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'log')
+        if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
+        try: limit = int(count)
+        except: limit = 10
+        if limit < 1: limit = 1
+        if limit > 50: limit = 50
+        cur.execute("""
+        SELECT moderator_id, target_id, action, reason, created_at 
+        FROM moderation_logs WHERE peer_id=%s 
+        ORDER BY id DESC LIMIT %s
+        """, (msg.peer_id, limit))
+        logs = cur.fetchall()
+        if not logs: return await msg.answer("📝 ЛОГИ МОДЕРАЦИИ\n\n❌ Нет записей")
+        text = f"📝 ЛОГИ МОДЕРАЦИИ (последние {len(logs)}):\n\n"
+        for i, (mod_id, target_id, action, reason, created_at) in enumerate(logs, 1):
+            try: mod_name = await get_user_name(mod_id)
+            except: mod_name = f"id{mod_id}"
+            try: target_name = await get_user_name(target_id)
+            except: target_name = f"id{target_id}"
+            time_str = created_at.strftime('%H:%M') if created_at else "?"
+            reason_str = f" — {reason}" if reason else ""
+            text += f"{i}. {mod_name} {action} {target_name}{reason_str} | {time_str}\n"
         await msg.answer(text)
     finally: conn.close()
 
@@ -1835,7 +1980,9 @@ async def handler(msg: Message):
         uid, pid = msg.from_id, msg.peer_id
         
         if pid < 2000000000 and uid != OWNER_ID:
-            return
+            bot_role = get_bot_role(cur, uid)
+            if not bot_role:
+                return
         
         if pid < 2000000000:
             return
