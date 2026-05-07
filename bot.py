@@ -332,15 +332,35 @@ async def admin_help(msg: Message):
 @bot.on.message(text="/adminchats")
 async def admin_chats(msg: Message):
     if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
+    
+    await msg.answer("📋 Загружаю список бесед...")
+    
     conn, cur = db()
     try:
         cur.execute("SELECT COUNT(DISTINCT peer_id) FROM users WHERE peer_id > 2000000000")
         total = cur.fetchone()[0]
         cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000 ORDER BY peer_id")
         chats = cur.fetchall()
+        
         text = f"📋 БЕСЕДЫ БОТА (всего: {total}):\n\n"
+        
         for i, (peer_id,) in enumerate(chats, 1):
-            text += f"{i}. Беседа {peer_id}\n"
+            title = None
+            try:
+                # Пробуем получить информацию о беседе
+                conv = await bot.api.messages.get_conversations_by_id(peer_ids=[peer_id])
+                if conv and conv.items:
+                    item = conv.items[0]
+                    if hasattr(item, 'chat_settings') and item.chat_settings:
+                        title = item.chat_settings.title
+            except:
+                pass
+            
+            if title:
+                text += f"{i}. {title} (ID: {peer_id})\n"
+            else:
+                text += f"{i}. Беседа {peer_id}\n"
+        
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
                 await msg.answer(text[i:i+4000])
