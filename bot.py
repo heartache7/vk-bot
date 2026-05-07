@@ -361,7 +361,7 @@ async def help_cmd(msg: Message):
     )
 
 # =========================
-# BOTROLE
+# BOTROLE (выдача должности)
 # =========================
 @bot.on.message(text="/botrole")
 async def botrole_help(msg: Message):
@@ -376,7 +376,7 @@ async def botrole_help(msg: Message):
     return await msg.answer(
         "🏅 ВЫДАЧА ДОЛЖНОСТИ\n\n"
         "/botrole @user [должность] - выдать\n"
-        "/botrole @user - снять\n\n"
+        "/removebotrole @user - снять\n\n"
         "📋 Должности:\n"
         "• Агент Поддержки\n"
         "• Помощник куратора по отделу агентов поддержки\n"
@@ -384,42 +384,9 @@ async def botrole_help(msg: Message):
         "• Генеральный Директор"
     )
 
-@bot.on.message(text="/botrole <target>")
-async def botrole_remove(msg: Message, target: str):
-    if msg.peer_id > 2000000000: return
-    
-    conn, cur = db()
-    try:
-        giver_role = get_bot_role(cur, msg.from_id)
-        if msg.from_id != OWNER_ID and not can_manage_agents(cur, msg.from_id):
-            return await msg.answer("❌ У вас нет прав на управление должностями")
-        
-        uid = get_target_id(msg)
-        if not uid:
-            clean = target.replace("@", "").replace("[", "").replace("]", "").strip()
-            if clean.isdigit():
-                uid = int(clean)
-            else:
-                uid = await resolve_user_id(clean)
-        
-        if not uid:
-            return await msg.answer("❌ Пользователь не найден\n\n💡 Используйте: /botrole @username или /botrole ID")
-        
-        target_role = get_bot_role(cur, uid)
-        if not target_role:
-            user_name = await get_user_name(uid)
-            return await msg.answer(f"❌ У пользователя {user_name} нет должности")
-        
-        if msg.from_id != OWNER_ID and not can_manage_bot_role(giver_role, target_role):
-            return await msg.answer(f"❌ Вы не можете снять должность '{target_role}'")
-        
-        cur.execute("DELETE FROM bot_roles WHERE user_id=%s", (uid,))
-        user_name = await get_user_name(uid)
-        await msg.answer(f"🏅 ДОЛЖНОСТЬ СНЯТА\n👤 {user_name}\n❌ Была: {target_role}")
-    finally: conn.close()
-
 @bot.on.message(text="/botrole <target> <role_name>")
 async def botrole_give(msg: Message, target: str, role_name: str):
+    """Выдача должности"""
     if msg.peer_id > 2000000000: return
     
     if role_name not in BOT_ROLE_RANKS:
@@ -454,6 +421,49 @@ async def botrole_give(msg: Message, target: str, role_name: str):
         
         user_name = await get_user_name(uid)
         await msg.answer(f"🏅 ДОЛЖНОСТЬ ВЫДАНА\n👤 {user_name}\n📋 {role_name}")
+    finally: conn.close()
+
+# =========================
+# REMOVEBOTROLE (снятие должности)
+# =========================
+@bot.on.message(text="/removebotrole")
+async def removebotrole_help(msg: Message):
+    if msg.peer_id > 2000000000: return
+    return await msg.answer("🏅 СНЯТИЕ ДОЛЖНОСТИ\n\n/removebotrole @user - снять должность")
+
+@bot.on.message(text="/removebotrole <target>")
+async def removebotrole_cmd(msg: Message, target: str):
+    """Снятие должности"""
+    if msg.peer_id > 2000000000: return
+    
+    conn, cur = db()
+    try:
+        giver_role = get_bot_role(cur, msg.from_id)
+        if msg.from_id != OWNER_ID and not can_manage_agents(cur, msg.from_id):
+            return await msg.answer("❌ У вас нет прав на управление должностями")
+        
+        uid = get_target_id(msg)
+        if not uid:
+            clean = target.replace("@", "").replace("[", "").replace("]", "").strip()
+            if clean.isdigit():
+                uid = int(clean)
+            else:
+                uid = await resolve_user_id(clean)
+        
+        if not uid:
+            return await msg.answer("❌ Пользователь не найден\n\n💡 Используйте: /removebotrole @username или /removebotrole ID")
+        
+        target_role = get_bot_role(cur, uid)
+        if not target_role:
+            user_name = await get_user_name(uid)
+            return await msg.answer(f"❌ У пользователя {user_name} нет должности")
+        
+        if msg.from_id != OWNER_ID and not can_manage_bot_role(giver_role, target_role):
+            return await msg.answer(f"❌ Вы не можете снять должность '{target_role}'")
+        
+        cur.execute("DELETE FROM bot_roles WHERE user_id=%s", (uid,))
+        user_name = await get_user_name(uid)
+        await msg.answer(f"🏅 ДОЛЖНОСТЬ СНЯТА\n👤 {user_name}\n❌ Была: {target_role}")
     finally: conn.close()
 
 # =========================
@@ -647,6 +657,7 @@ async def admin_panel(msg: Message):
             f"/reports - список репортов\n"
             f"/replyreport [номер] [текст]\n"
             f"/botrole @user [должность]\n"
+            f"/removebotrole @user\n"
             f"/botroles - список должностей\n"
             f"/adminchats - список бесед\n"
             f"/adminhelp - помощь"
@@ -666,6 +677,7 @@ async def admin_help(msg: Message):
         "/reports - открытые репорты\n"
         "/replyreport [номер] [текст] - ответ\n"
         "/botrole @user [должность] - выдать должность\n"
+        "/removebotrole @user - снять должность\n"
         "/botroles - список должностей\n"
         "/sendto [peer_id] [текст] - в беседу"
     )
@@ -1464,7 +1476,6 @@ async def staff(msg: Message):
 # =========================
 # WARN / MUTE / UNMUTE / BAN / UNBAN / GETBAN / KICK
 # =========================
-
 @bot.on.message(text="/warn")
 async def warn_help(msg: Message):
     if msg.peer_id < 2000000000: return
