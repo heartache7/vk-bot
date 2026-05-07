@@ -82,6 +82,17 @@ def init():
                 PRIMARY KEY (group_id, peer_id)
             );""")
 
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS reports(
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                peer_id BIGINT,
+                description TEXT,
+                status TEXT DEFAULT 'open',
+                reply TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );""")
+
             default_permissions = [
                 ('warn', 20), ('mute', 20), ('unmute', 20),
                 ('ban', 50), ('unban', 50), ('kick', 20),
@@ -286,7 +297,7 @@ async def help_cmd(msg: Message):
     )
 
 # =========================
-# REPORT (из ЛС и бесед)
+# REPORT
 # =========================
 @bot.on.message(text="/report")
 async def report_help(msg: Message):
@@ -306,29 +317,133 @@ async def report_cmd(msg: Message, description: str):
     if len(description) > 500:
         return await msg.answer("❌ Описание слишком длинное (макс. 500 символов)")
     
-    reporter_name = await get_user_name(msg.from_id)
-    
-    # Определяем откуда репорт
-    if msg.peer_id < 2000000000:
-        source_id = f"ЛС (peer_id: {msg.peer_id})"
-    else:
-        source_id = f"Беседа: {msg.peer_id}"
-    
+    conn, cur = db()
     try:
-        await bot.api.messages.send(
-            user_id=OWNER_ID,
-            message=f"🐛 НОВЫЙ РЕПОРТ\n\n"
-                   f"👤 От: {reporter_name} (id{msg.from_id})\n"
-                   f"💬 Откуда: {source_id}\n"
-                   f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
-                   f"📝 Описание:\n{description}\n\n"
-                   f"💡 Ответить: /replyreport {msg.from_id} {msg.peer_id} [текст]",
-            random_id=0
-        )
-        await msg.answer(f"🐛 Репорт отправлен!\n👤 {reporter_name}\n📝 {description}\n\nСпасибо за обратную связь!")
-    except Exception as e:
-        logger.error(f"Failed to send report: {e}")
-        await msg.answer("❌ Не удалось отправить репорт.")
+        cur.execute("INSERT INTO reports (user_id, peer_id, description) VALUES (%s, %s, %s) RETURNING id",
+                   (msg.from_id, msg.peer_id, description))
+        report_id = cur.fetchone()[0]
+        
+        reporter_name = await get_user_name(msg.from_id)
+        
+        # Уведомляем владельца в ЛС
+        try:
+            await bot.api.messages.send(
+                user_id=OWNER_ID,
+                message=f"🐛 НОВЫЙ РЕПОРТ #{report_id}\n\n"
+                       f"👤 От: {reporter_name} (id{msg.from_id})\n"
+                       f"📝 {description}\n"
+                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
+                       f"💡 Ответить: /replyreport {report_id} [текст]\n"
+                       f"📋 Все репорты: /reports",
+                random_id=0
+            )
+        except:
+            pass
+        
+        await msg.answer(f"🐛 Репорт #{report_id} отправлен!\n👤 {reporter_name}\n📝 {description}\n\nСпасибо за обратную связь!")
+    finally: conn.close()
+
+# =========================
+# REPORTS (список, только владелец в ЛС)
+# =========================
+@bot.on.message(text="/reports")
+async def reports_list(msg: Message):
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
+        return
+    
+    conn, cur = db()
+    try:
+        cur.execute("SELECT id, user_id, description, status, created_at FROM reports WHERE status='open' ORDER BY id")
+        reports = cur.fetchall()
+        
+        if not reports:
+            return await msg.answer("📋 РЕПОРТЫ\n\n✅ Нет открытых репортов")
+        
+        text = f"📋 ОТКРЫТЫЕ РЕПОРТЫ ({len(reports)}):\n\n"
+        for rid, user_id, desc, status, created_at in reports:
+            try:
+                user_name = await get_user_name(user_id)
+            except:
+                user_name = f"id{user_id}"
+            
+            date_str = created_at.strftime('%d.%m в %H:%M') if created_at else "Неизвестно"
+            short_desc = desc[:50] + "..." if len(desc) > 50 else desc
+            
+            text += f"🐛 #{rid} | {user_name}\n"
+            text += f"   📝 {short_desc}\n"
+            text += f"   📅 {date_str}\n"
+            text += f"   💡 /replyreport {rid} [ответ]\n\n"
+        
+        if len(text) > 4000:
+            for i in range(0, len(text), 4000):
+                await msg.answer(text[i:i+4000])
+        else:
+            await msg.answer(text)
+    finally: conn.close()
+
+# =========================
+# REPLYREPORT (ответ на репорт)
+# =========================
+@bot.on.message(text="/replyreport <report_id> <text>")
+async def replyreport_cmd(msg: Message, report_id: str, text: str):
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
+        return
+    
+    try: rid = int(report_id)
+    except: return await msg.answer("❌ Номер репорта должен быть числом\n\nПример: /replyreport 1 Ваш ответ")
+    
+    conn, cur = db()
+    try:
+        cur.execute("SELECT user_id, peer_id, description FROM reports WHERE id=%s AND status='open'", (rid,))
+        report = cur.fetchone()
+        
+        if not report:
+            return await msg.answer(f"❌ Репорт #{rid} не найден или уже отвечен")
+        
+        user_id, peer_id, description = report
+        
+        # Пробуем отправить в ЛС
+        sent_to_ls = False
+        try:
+            await bot.api.messages.send(
+                user_id=user_id,
+                message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
+                       f"👑 Владелец бота ответил:\n\n"
+                       f"{text}\n\n"
+                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
+                       f"Ваш репорт: {description[:50]}...",
+                random_id=0
+            )
+            sent_to_ls = True
+        except:
+            pass
+        
+        # Если не получилось в ЛС и это беседа — пробуем в беседу
+        if not sent_to_ls and peer_id > 2000000000:
+            try:
+                await bot.api.messages.send(
+                    peer_id=peer_id,
+                    message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
+                           f"👤 @id{user_id}\n"
+                           f"👑 Владелец бота ответил:\n\n"
+                           f"{text}\n\n"
+                           f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
+                           f"💡 Откройте ЛС для бота чтобы получать ответы там.",
+                    random_id=0
+                )
+                sent_to_ls = True
+            except:
+                pass
+        
+        # Обновляем статус репорта
+        cur.execute("UPDATE reports SET status='closed', reply=%s WHERE id=%s", (text, rid))
+        
+        if sent_to_ls:
+            await msg.answer(f"✅ Ответ на репорт #{rid} отправлен")
+        else:
+            await msg.answer(f"⚠️ Ответ сохранён, но не удалось отправить пользователю (ЛС закрыты)")
+    
+    finally: conn.close()
 
 # =========================
 # ADMIN PANEL
@@ -346,18 +461,22 @@ async def admin_panel(msg: Message):
         active_bans = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM groups")
         total_groups = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM reports WHERE status='open'")
+        open_reports = cur.fetchone()[0]
         await msg.answer(
             f"👑 АДМИН-ПАНЕЛЬ FLEX BOT\n\n"
             f"📊 Статистика:\n"
             f"💬 Бесед: {total_chats}\n"
             f"👥 Пользователей: {total_users}\n"
             f"🚫 Активных банов: {active_bans}\n"
-            f"🌐 Объединений: {total_groups}\n\n"
+            f"🌐 Объединений: {total_groups}\n"
+            f"🐛 Открытых репортов: {open_reports}\n\n"
             f"📋 Команды:\n"
             f"/globalban [id] [время] [причина]\n"
             f"/globalunban [id]\n"
             f"/broadcast [текст]\n"
-            f"/replyreport [id] [peer_id] [текст] - ответ на репорт\n"
+            f"/reports - список репортов\n"
+            f"/replyreport [номер] [текст] - ответ на репорт\n"
             f"/adminchats - список бесед\n"
             f"/adminhelp - помощь\n"
             f"/admin - эта панель"
@@ -374,25 +493,22 @@ async def admin_help(msg: Message):
         "/globalban [id] [время] [причина] - бан везде\n"
         "/globalunban [id] - разбан везде\n"
         "/broadcast [текст] - рассылка во все беседы\n"
-        "/replyreport [id] [peer_id] [текст] - ответ на репорт\n"
+        "/reports - список открытых репортов\n"
+        "/replyreport [номер] [текст] - ответить на репорт\n"
         "/sendto [peer_id] [текст] - сообщение в беседу"
     )
 
 @bot.on.message(text="/adminchats")
 async def admin_chats(msg: Message):
     if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
-    
     await msg.answer("📋 Загружаю список бесед...")
-    
     conn, cur = db()
     try:
         cur.execute("SELECT COUNT(DISTINCT peer_id) FROM users WHERE peer_id > 2000000000")
         total = cur.fetchone()[0]
         cur.execute("SELECT DISTINCT peer_id FROM users WHERE peer_id > 2000000000 ORDER BY peer_id")
         chats = cur.fetchall()
-        
         text = f"📋 БЕСЕДЫ БОТА (всего: {total}):\n\n"
-        
         for i, (peer_id,) in enumerate(chats, 1):
             title = None
             try:
@@ -401,65 +517,17 @@ async def admin_chats(msg: Message):
                     item = conv.items[0]
                     if hasattr(item, 'chat_settings') and item.chat_settings:
                         title = item.chat_settings.title
-            except:
-                pass
-            
+            except: pass
             if title:
                 text += f"{i}. {title} (ID: {peer_id})\n"
             else:
                 text += f"{i}. Беседа {peer_id}\n"
-        
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
                 await msg.answer(text[i:i+4000])
         else:
             await msg.answer(text)
     finally: conn.close()
-
-@bot.on.message(text="/replyreport <user_id> <peer_id> <text>")
-async def replyreport_cmd(msg: Message, user_id: str, peer_id: str, text: str):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
-    
-    try: uid = int(user_id)
-    except: return await msg.answer("❌ ID пользователя должен быть числом")
-    
-    try: pid = int(peer_id)
-    except: return await msg.answer("❌ ID беседы должен быть числом")
-    
-    # Пробуем отправить в ЛС (приоритетно)
-    try:
-        await bot.api.messages.send(
-            user_id=uid,
-            message=f"📢 ОТВЕТ НА РЕПОРТ\n\n"
-                   f"👑 Владелец бота ответил:\n\n"
-                   f"{text}\n\n"
-                   f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}",
-            random_id=0
-        )
-        await msg.answer(f"✅ Ответ отправлен в ЛС пользователю id{uid}")
-        return
-    except:
-        pass
-    
-    # Если ЛС закрыты — отправляем туда откуда был репорт
-    try:
-        if pid < 2000000000:
-            await msg.answer(f"❌ Не удалось отправить ответ — ЛС пользователя закрыты")
-        else:
-            await bot.api.messages.send(
-                peer_id=pid,
-                message=f"📢 ОТВЕТ НА РЕПОРТ\n\n"
-                       f"👤 @id{uid}\n"
-                       f"👑 Владелец бота ответил:\n\n"
-                       f"{text}\n\n"
-                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
-                       f"💡 Откройте ЛС для бота чтобы получать ответы там.",
-                random_id=0
-            )
-            await msg.answer(f"✅ Ответ отправлен в беседу {pid} (ЛС закрыты)")
-    except Exception as e:
-        await msg.answer(f"❌ Не удалось отправить: {e}")
 
 @bot.on.message(text="/globalban <target_id> <time_str> <reason>")
 async def globalban_cmd(msg: Message, target_id: str, time_str: str, reason: str):
@@ -734,8 +802,9 @@ async def leavegroup_cmd(msg: Message):
     finally: conn.close()
 
 # =========================
-# GBAN
+# GBAN / GUNBAN / GKICK / GGIVEROLE / GREMOVEROLE / GZOV / GSNICK / GRNICK
 # =========================
+
 @bot.on.message(text="/gban")
 async def gban_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -785,9 +854,6 @@ async def process_gban(msg: Message, target: str, time_str: str, reason: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GUNBAN
-# =========================
 @bot.on.message(text="/gunban")
 async def gunban_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -821,9 +887,6 @@ async def gunban_cmd(msg: Message, target: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ РАЗБАН\n👤 {user_name}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GKICK
-# =========================
 @bot.on.message(text="/gkick")
 async def gkick_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -857,9 +920,6 @@ async def gkick_cmd(msg: Message, target: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ КИК\n👤 {user_name}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GGIVEROLE
-# =========================
 @bot.on.message(text="/ggiverole")
 async def ggiverole_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -899,9 +959,6 @@ async def ggiverole_cmd(msg: Message, target: str, priority: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНАЯ РОЛЬ\n👤 {user_name}\n📋 {get_role_name(cur, msg.peer_id, p)}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GREMOVEROLE
-# =========================
 @bot.on.message(text="/gremoverole")
 async def gremoverole_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -935,9 +992,6 @@ async def gremoverole_cmd(msg: Message, target: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ СБРОС РОЛИ\n👤 {user_name}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GZOV
-# =========================
 @bot.on.message(text="/gzov")
 async def gzov_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -972,9 +1026,6 @@ async def gzov_cmd(msg: Message, reason: str = "Без причины"):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ ЗОВ\n🔊 {caller_name}\n📢 {reason}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GSNICK
-# =========================
 @bot.on.message(text="/gsnick")
 async def gsnick_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -1009,9 +1060,6 @@ async def gsnick_cmd(msg: Message, target: str, nick: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ НИК\n👤 {user_name}\n🏷 {nick}\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GRNICK
-# =========================
 @bot.on.message(text="/grnick")
 async def grnick_help(msg: Message):
     if msg.peer_id < 2000000000: return
