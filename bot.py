@@ -286,22 +286,20 @@ async def help_cmd(msg: Message):
     )
 
 # =========================
-# REPORT
+# REPORT (из ЛС и бесед)
 # =========================
 @bot.on.message(text="/report")
 async def report_help(msg: Message):
-    if msg.peer_id < 2000000000: return
     return await msg.answer(
         "🐛 /report [описание]\n\n"
         "Отправляет сообщение о баге владельцу бота\n"
         "Пример: /report Не работает команда /ban\n"
-        "Минимум 10 символов, максимум 500"
+        "Минимум 10 символов, максимум 500\n\n"
+        "💡 Можно отправить из ЛС или беседы"
     )
 
 @bot.on.message(text="/report <description>")
 async def report_cmd(msg: Message, description: str):
-    if msg.peer_id < 2000000000: return
-    
     if len(description) < 10:
         return await msg.answer("❌ Опишите проблему подробнее (минимум 10 символов)")
     
@@ -310,20 +308,27 @@ async def report_cmd(msg: Message, description: str):
     
     reporter_name = await get_user_name(msg.from_id)
     
+    # Определяем откуда репорт
+    if msg.peer_id < 2000000000:
+        source_id = f"ЛС (peer_id: {msg.peer_id})"
+    else:
+        source_id = f"Беседа: {msg.peer_id}"
+    
     try:
         await bot.api.messages.send(
             user_id=OWNER_ID,
             message=f"🐛 НОВЫЙ РЕПОРТ\n\n"
                    f"👤 От: {reporter_name} (id{msg.from_id})\n"
-                   f"💬 Беседа: {msg.peer_id}\n"
+                   f"💬 Откуда: {source_id}\n"
                    f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
-                   f"📝 Описание:\n{description}",
+                   f"📝 Описание:\n{description}\n\n"
+                   f"💡 Ответить: /replyreport {msg.from_id} {msg.peer_id} [текст]",
             random_id=0
         )
         await msg.answer(f"🐛 Репорт отправлен!\n👤 {reporter_name}\n📝 {description}\n\nСпасибо за обратную связь!")
     except Exception as e:
         logger.error(f"Failed to send report: {e}")
-        await msg.answer("❌ Не удалось отправить репорт. Попробуйте позже.")
+        await msg.answer("❌ Не удалось отправить репорт.")
 
 # =========================
 # ADMIN PANEL
@@ -352,7 +357,7 @@ async def admin_panel(msg: Message):
             f"/globalban [id] [время] [причина]\n"
             f"/globalunban [id]\n"
             f"/broadcast [текст]\n"
-            f"/replyreport [id] [текст] - ответ на репорт\n"
+            f"/replyreport [id] [peer_id] [текст] - ответ на репорт\n"
             f"/adminchats - список бесед\n"
             f"/adminhelp - помощь\n"
             f"/admin - эта панель"
@@ -369,7 +374,7 @@ async def admin_help(msg: Message):
         "/globalban [id] [время] [причина] - бан везде\n"
         "/globalunban [id] - разбан везде\n"
         "/broadcast [текст] - рассылка во все беседы\n"
-        "/replyreport [id] [текст] - ответить на репорт\n"
+        "/replyreport [id] [peer_id] [текст] - ответ на репорт\n"
         "/sendto [peer_id] [текст] - сообщение в беседу"
     )
 
@@ -411,25 +416,48 @@ async def admin_chats(msg: Message):
             await msg.answer(text)
     finally: conn.close()
 
-@bot.on.message(text="/replyreport <user_id> <text>")
-async def replyreport_cmd(msg: Message, user_id: str, text: str):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
+@bot.on.message(text="/replyreport <user_id> <peer_id> <text>")
+async def replyreport_cmd(msg: Message, user_id: str, peer_id: str, text: str):
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
+        return
     
     try: uid = int(user_id)
     except: return await msg.answer("❌ ID пользователя должен быть числом")
     
+    try: pid = int(peer_id)
+    except: return await msg.answer("❌ ID беседы должен быть числом")
+    
+    # Пробуем отправить в ЛС (приоритетно)
     try:
         await bot.api.messages.send(
             user_id=uid,
             message=f"📢 ОТВЕТ НА РЕПОРТ\n\n"
                    f"👑 Владелец бота ответил:\n\n"
                    f"{text}\n\n"
-                   f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
-                   f"💡 Если проблема решена - спасибо за репорт!\n"
-                   f"Если нет - отправьте новый репорт с деталями.",
+                   f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}",
             random_id=0
         )
-        await msg.answer(f"✅ Ответ отправлен пользователю id{uid}")
+        await msg.answer(f"✅ Ответ отправлен в ЛС пользователю id{uid}")
+        return
+    except:
+        pass
+    
+    # Если ЛС закрыты — отправляем туда откуда был репорт
+    try:
+        if pid < 2000000000:
+            await msg.answer(f"❌ Не удалось отправить ответ — ЛС пользователя закрыты")
+        else:
+            await bot.api.messages.send(
+                peer_id=pid,
+                message=f"📢 ОТВЕТ НА РЕПОРТ\n\n"
+                       f"👤 @id{uid}\n"
+                       f"👑 Владелец бота ответил:\n\n"
+                       f"{text}\n\n"
+                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
+                       f"💡 Откройте ЛС для бота чтобы получать ответы там.",
+                random_id=0
+            )
+            await msg.answer(f"✅ Ответ отправлен в беседу {pid} (ЛС закрыты)")
     except Exception as e:
         await msg.answer(f"❌ Не удалось отправить: {e}")
 
@@ -515,7 +543,7 @@ async def start(msg: Message):
     finally: conn.close()
 
 # =========================
-# SETCMD / GSETCMD
+# SETCMD
 # =========================
 @bot.on.message(text="/setcmd")
 async def setcmd_help(msg: Message):
@@ -547,6 +575,9 @@ async def setcmd(msg: Message, cmd_name: str, priority: str):
         await msg.answer(f"✅ /{cmd_name.lower()} - роль {p}+")
     finally: conn.close()
 
+# =========================
+# GSETCMD
+# =========================
 @bot.on.message(text="/gsetcmd")
 async def gsetcmd_help(msg: Message):
     if msg.peer_id < 2000000000: return
