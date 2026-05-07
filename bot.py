@@ -93,6 +93,17 @@ def init():
                 created_at TIMESTAMP DEFAULT NOW()
             );""")
 
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS moderation_logs(
+                id SERIAL PRIMARY KEY,
+                peer_id BIGINT,
+                moderator_id BIGINT,
+                target_id BIGINT,
+                action TEXT,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );""")
+
             default_permissions = [
                 ('warn', 20), ('mute', 20), ('unmute', 20),
                 ('ban', 50), ('unban', 50), ('kick', 20),
@@ -104,7 +115,7 @@ def init():
                 ('gban', 50), ('gkick', 50), ('ggiverole', 50), ('gzov', 50),
                 ('gremoverole', 50), ('gsnick', 50), ('grnick', 50),
                 ('gunban', 50), ('gnick', 20), ('getban', 50), ('groups', 100),
-                ('report', 0)
+                ('report', 0), ('top', 0), ('activity', 0), ('log', 20)
             ]
             
             for cmd, role in default_permissions:
@@ -238,6 +249,14 @@ def can_punish(cur, peer_id, punisher_id, target_id):
     target_role = get_user_role(cur, peer_id, target_id)
     return punisher_role > target_role
 
+def add_log(cur, peer_id, moderator_id, target_id, action, reason=""):
+    """Добавляет запись в лог модерации"""
+    try:
+        cur.execute("INSERT INTO moderation_logs (peer_id, moderator_id, target_id, action, reason) VALUES (%s,%s,%s,%s,%s)",
+                   (peer_id, moderator_id, target_id, action, reason))
+    except:
+        pass
+
 def get_group_id(cur, peer_id):
     cur.execute("SELECT group_id FROM group_chats WHERE peer_id=%s", (peer_id,))
     res = cur.fetchone()
@@ -292,9 +311,156 @@ async def help_cmd(msg: Message):
         "🌐 ОБЪЕДИНЕНИЯ:\n"
         "/creategroup /setgroup /leavegroup /groups\n"
         "/gban /gunban /gkick /ggiverole /gremoverole /gzov /gsnick /grnick /gsetcmd\n"
-        "📊 /stats\n⚙️ /setcmd /gsetcmd\n👑 /sysrole\n"
+        "📊 /stats /top /activity\n"
+        "📝 /log - логи модерации\n"
+        "⚙️ /setcmd /gsetcmd\n👑 /sysrole\n"
         "🐛 /report - сообщить об ошибке"
     )
+
+# =========================
+# TOP
+# =========================
+@bot.on.message(text="/top")
+async def top_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    return await msg.answer("📊 /top [количество]\nПоказывает топ по сообщениям\nПример: /top 10")
+
+@bot.on.message(text="/top <count>")
+async def top_cmd(msg: Message, count: str = "10"):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        try: limit = int(count)
+        except: limit = 10
+        if limit < 1: limit = 1
+        if limit > 50: limit = 50
+        
+        cur.execute("SELECT user_id, msgs FROM users WHERE peer_id=%s AND msgs>0 ORDER BY msgs DESC LIMIT %s", (msg.peer_id, limit))
+        top_users = cur.fetchall()
+        
+        if not top_users:
+            return await msg.answer("📊 ТОП ПО СООБЩЕНИЯМ\n\n❌ Нет данных")
+        
+        text = f"📊 ТОП {limit} ПО СООБЩЕНИЯМ\n\n"
+        medals = ["🥇", "🥈", "🥉"]
+        
+        for i, (user_id, msgs) in enumerate(top_users):
+            try: name = await get_user_name(user_id)
+            except: name = f"id{user_id}"
+            
+            if i < 3:
+                prefix = medals[i]
+            else:
+                prefix = f"{i+1}."
+            
+            text += f"{prefix} {name} — {msgs} сообщений\n"
+        
+        await msg.answer(text)
+    finally: conn.close()
+
+# =========================
+# ACTIVITY
+# =========================
+@bot.on.message(text="/activity")
+async def activity_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    return await msg.answer("📈 /activity - активность за сегодня\n/activity week - за неделю")
+
+@bot.on.message(text="/activity")
+async def activity_today(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        # За сегодня
+        cur.execute("""
+        SELECT COUNT(*) FROM users WHERE peer_id=%s 
+        AND msgs > 0
+        """, (msg.peer_id,))
+        active_today = cur.fetchone()[0]
+        
+        cur.execute("SELECT SUM(msgs) FROM users WHERE peer_id=%s", (msg.peer_id,))
+        total_msgs = cur.fetchone()[0] or 0
+        
+        cur.execute("SELECT user_id, msgs FROM users WHERE peer_id=%s ORDER BY msgs DESC LIMIT 1", (msg.peer_id,))
+        top_user = cur.fetchone()
+        
+        text = "📈 АКТИВНОСТЬ БЕСЕДЫ\n\n"
+        text += f"👥 Участников с сообщениями: {active_today}\n"
+        text += f"💬 Всего сообщений: {total_msgs}\n"
+        
+        if top_user:
+            try: name = await get_user_name(top_user[0])
+            except: name = f"id{top_user[0]}"
+            text += f"🔥 Самый активный: {name} ({top_user[1]} сообщений)\n"
+        
+        await msg.answer(text)
+    finally: conn.close()
+
+@bot.on.message(text="/activity week")
+async def activity_week(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        week_ago = datetime.now() - timedelta(days=7)
+        
+        cur.execute("SELECT COUNT(*) FROM moderation_logs WHERE peer_id=%s AND created_at > %s", (msg.peer_id, week_ago))
+        actions = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM punishments WHERE peer_id=%s AND created_at > %s", (msg.peer_id, week_ago))
+        punishments = cur.fetchone()[0]
+        
+        text = "📈 АКТИВНОСТЬ ЗА НЕДЕЛЮ\n\n"
+        text += f"🛡 Действий модерации: {actions}\n"
+        text += f"⚠️ Наказаний: {punishments}\n"
+        text += f"📅 с {week_ago.strftime('%d.%m')} по {datetime.now().strftime('%d.%m')}\n"
+        
+        await msg.answer(text)
+    finally: conn.close()
+
+# =========================
+# LOG
+# =========================
+@bot.on.message(text="/log")
+async def log_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    return await msg.answer("📝 /log [количество] - последние логи\n/log @user - логи пользователя\nПример: /log 10")
+
+@bot.on.message(text="/log <count>")
+async def log_cmd(msg: Message, count: str = "10"):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        try: limit = int(count)
+        except: limit = 10
+        if limit < 1: limit = 1
+        if limit > 50: limit = 50
+        
+        cur.execute("""
+        SELECT moderator_id, target_id, action, reason, created_at 
+        FROM moderation_logs WHERE peer_id=%s 
+        ORDER BY id DESC LIMIT %s
+        """, (msg.peer_id, limit))
+        
+        logs = cur.fetchall()
+        
+        if not logs:
+            return await msg.answer("📝 ЛОГИ МОДЕРАЦИИ\n\n❌ Нет записей")
+        
+        text = f"📝 ЛОГИ МОДЕРАЦИИ (последние {len(logs)}):\n\n"
+        
+        for i, (mod_id, target_id, action, reason, created_at) in enumerate(logs, 1):
+            try: mod_name = await get_user_name(mod_id)
+            except: mod_name = f"id{mod_id}"
+            try: target_name = await get_user_name(target_id)
+            except: target_name = f"id{target_id}"
+            
+            time_str = created_at.strftime('%H:%M') if created_at else "?"
+            reason_str = f" — {reason}" if reason else ""
+            
+            text += f"{i}. {mod_name} {action} {target_name}{reason_str} | {time_str}\n"
+        
+        await msg.answer(text)
+    finally: conn.close()
 
 # =========================
 # REPORT
@@ -305,15 +471,13 @@ async def report_help(msg: Message):
         "🐛 /report [описание]\n\n"
         "Отправляет сообщение о баге владельцу бота\n"
         "Пример: /report Не работает команда /ban\n"
-        "Минимум 10 символов, максимум 500\n\n"
-        "💡 Можно отправить из ЛС или беседы"
+        "Минимум 10 символов, максимум 500"
     )
 
 @bot.on.message(text="/report <description>")
 async def report_cmd(msg: Message, description: str):
     if len(description) < 10:
         return await msg.answer("❌ Опишите проблему подробнее (минимум 10 символов)")
-    
     if len(description) > 500:
         return await msg.answer("❌ Описание слишком длинное (макс. 500 символов)")
     
@@ -322,10 +486,8 @@ async def report_cmd(msg: Message, description: str):
         cur.execute("INSERT INTO reports (user_id, peer_id, description) VALUES (%s, %s, %s) RETURNING id",
                    (msg.from_id, msg.peer_id, description))
         report_id = cur.fetchone()[0]
-        
         reporter_name = await get_user_name(msg.from_id)
         
-        # Уведомляем владельца в ЛС
         try:
             await bot.api.messages.send(
                 user_id=OWNER_ID,
@@ -337,42 +499,33 @@ async def report_cmd(msg: Message, description: str):
                        f"📋 Все репорты: /reports",
                 random_id=0
             )
-        except:
-            pass
+        except: pass
         
-        await msg.answer(f"🐛 Репорт #{report_id} отправлен!\n👤 {reporter_name}\n📝 {description}\n\nСпасибо за обратную связь!")
+        await msg.answer(f"🐛 Репорт #{report_id} отправлен!\n👤 {reporter_name}\n📝 {description}\n\nСпасибо!")
     finally: conn.close()
 
 # =========================
-# REPORTS (список, только владелец в ЛС)
+# REPORTS (список, только владелец)
 # =========================
 @bot.on.message(text="/reports")
 async def reports_list(msg: Message):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
     
     conn, cur = db()
     try:
-        cur.execute("SELECT id, user_id, description, status, created_at FROM reports WHERE status='open' ORDER BY id")
+        cur.execute("SELECT id, user_id, description, created_at FROM reports WHERE status='open' ORDER BY id")
         reports = cur.fetchall()
         
         if not reports:
             return await msg.answer("📋 РЕПОРТЫ\n\n✅ Нет открытых репортов")
         
         text = f"📋 ОТКРЫТЫЕ РЕПОРТЫ ({len(reports)}):\n\n"
-        for rid, user_id, desc, status, created_at in reports:
-            try:
-                user_name = await get_user_name(user_id)
-            except:
-                user_name = f"id{user_id}"
-            
+        for rid, user_id, desc, created_at in reports:
+            try: user_name = await get_user_name(user_id)
+            except: user_name = f"id{user_id}"
             date_str = created_at.strftime('%d.%m в %H:%M') if created_at else "Неизвестно"
             short_desc = desc[:50] + "..." if len(desc) > 50 else desc
-            
-            text += f"🐛 #{rid} | {user_name}\n"
-            text += f"   📝 {short_desc}\n"
-            text += f"   📅 {date_str}\n"
-            text += f"   💡 /replyreport {rid} [ответ]\n\n"
+            text += f"🐛 #{rid} | {user_name}\n   📝 {short_desc}\n   📅 {date_str}\n   💡 /replyreport {rid} [ответ]\n\n"
         
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
@@ -382,67 +535,55 @@ async def reports_list(msg: Message):
     finally: conn.close()
 
 # =========================
-# REPLYREPORT (ответ на репорт)
+# REPLYREPORT
 # =========================
 @bot.on.message(text="/replyreport <report_id> <text>")
 async def replyreport_cmd(msg: Message, report_id: str, text: str):
-    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000:
-        return
+    if msg.from_id != OWNER_ID or msg.peer_id > 2000000000: return
     
     try: rid = int(report_id)
     except: return await msg.answer("❌ Номер репорта должен быть числом\n\nПример: /replyreport 1 Ваш ответ")
     
     conn, cur = db()
     try:
-        cur.execute("SELECT user_id, peer_id, description FROM reports WHERE id=%s AND status='open'", (rid,))
+        cur.execute("SELECT user_id, peer_id FROM reports WHERE id=%s AND status='open'", (rid,))
         report = cur.fetchone()
         
         if not report:
             return await msg.answer(f"❌ Репорт #{rid} не найден или уже отвечен")
         
-        user_id, peer_id, description = report
+        user_id, peer_id = report
         
-        # Пробуем отправить в ЛС
-        sent_to_ls = False
+        sent = False
         try:
             await bot.api.messages.send(
                 user_id=user_id,
                 message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
-                       f"👑 Владелец бота ответил:\n\n"
-                       f"{text}\n\n"
-                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
-                       f"Ваш репорт: {description[:50]}...",
+                       f"👑 Владелец бота ответил:\n\n{text}\n\n"
+                       f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}",
                 random_id=0
             )
-            sent_to_ls = True
-        except:
-            pass
+            sent = True
+        except: pass
         
-        # Если не получилось в ЛС и это беседа — пробуем в беседу
-        if not sent_to_ls and peer_id > 2000000000:
+        if not sent and peer_id > 2000000000:
             try:
                 await bot.api.messages.send(
                     peer_id=peer_id,
                     message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n"
-                           f"👤 @id{user_id}\n"
-                           f"👑 Владелец бота ответил:\n\n"
-                           f"{text}\n\n"
-                           f"📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n\n"
+                           f"👤 @id{user_id}\n👑 Владелец ответил:\n\n{text}\n\n"
                            f"💡 Откройте ЛС для бота чтобы получать ответы там.",
                     random_id=0
                 )
-                sent_to_ls = True
-            except:
-                pass
+                sent = True
+            except: pass
         
-        # Обновляем статус репорта
         cur.execute("UPDATE reports SET status='closed', reply=%s WHERE id=%s", (text, rid))
         
-        if sent_to_ls:
+        if sent:
             await msg.answer(f"✅ Ответ на репорт #{rid} отправлен")
         else:
-            await msg.answer(f"⚠️ Ответ сохранён, но не удалось отправить пользователю (ЛС закрыты)")
-    
+            await msg.answer(f"⚠️ Ответ сохранён, но не удалось отправить (ЛС закрыты)")
     finally: conn.close()
 
 # =========================
@@ -476,10 +617,9 @@ async def admin_panel(msg: Message):
             f"/globalunban [id]\n"
             f"/broadcast [текст]\n"
             f"/reports - список репортов\n"
-            f"/replyreport [номер] [текст] - ответ на репорт\n"
+            f"/replyreport [номер] [текст]\n"
             f"/adminchats - список бесед\n"
-            f"/adminhelp - помощь\n"
-            f"/admin - эта панель"
+            f"/adminhelp - помощь"
         )
     finally: conn.close()
 
@@ -492,10 +632,10 @@ async def admin_help(msg: Message):
         "/adminchats - список бесед\n"
         "/globalban [id] [время] [причина] - бан везде\n"
         "/globalunban [id] - разбан везде\n"
-        "/broadcast [текст] - рассылка во все беседы\n"
-        "/reports - список открытых репортов\n"
-        "/replyreport [номер] [текст] - ответить на репорт\n"
-        "/sendto [peer_id] [текст] - сообщение в беседу"
+        "/broadcast [текст] - рассылка\n"
+        "/reports - открытые репорты\n"
+        "/replyreport [номер] [текст] - ответ\n"
+        "/sendto [peer_id] [текст] - в беседу"
     )
 
 @bot.on.message(text="/adminchats")
@@ -518,10 +658,7 @@ async def admin_chats(msg: Message):
                     if hasattr(item, 'chat_settings') and item.chat_settings:
                         title = item.chat_settings.title
             except: pass
-            if title:
-                text += f"{i}. {title} (ID: {peer_id})\n"
-            else:
-                text += f"{i}. Беседа {peer_id}\n"
+            text += f"{i}. {title or f'Беседа {peer_id}'} (ID: {peer_id})\n"
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
                 await msg.answer(text[i:i+4000])
@@ -611,7 +748,7 @@ async def start(msg: Message):
     finally: conn.close()
 
 # =========================
-# SETCMD
+# SETCMD / GSETCMD / GROUPS / CREATEGROUP / SETGROUP / LEAVEGROUP
 # =========================
 @bot.on.message(text="/setcmd")
 async def setcmd_help(msg: Message):
@@ -643,9 +780,6 @@ async def setcmd(msg: Message, cmd_name: str, priority: str):
         await msg.answer(f"✅ /{cmd_name.lower()} - роль {p}+")
     finally: conn.close()
 
-# =========================
-# GSETCMD
-# =========================
 @bot.on.message(text="/gsetcmd")
 async def gsetcmd_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -676,9 +810,6 @@ async def gsetcmd_cmd(msg: Message, cmd_name: str, priority: str):
         await msg.answer(f"🌐 ГЛОБАЛЬНАЯ НАСТРОЙКА\n/{cmd_name.lower()} - роль {p}+\n📊 {len(chats)} бесед")
     finally: conn.close()
 
-# =========================
-# GROUPS
-# =========================
 @bot.on.message(text="/groups")
 async def groups_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -724,9 +855,6 @@ async def groups_list(msg: Message):
         await msg.answer(text)
     finally: conn.close()
 
-# =========================
-# CREATEGROUP / SETGROUP / LEAVEGROUP
-# =========================
 @bot.on.message(text="/creategroup")
 async def creategroup_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -848,6 +976,7 @@ async def process_gban(msg: Message, target: str, time_str: str, reason: str):
         for peer_id in chats:
             try:
                 cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at, reason, banned_by) VALUES (%s,%s,'ban',%s,%s,%s)", (uid, peer_id, end_time, final_reason, msg.from_id))
+                add_log(cur, peer_id, msg.from_id, uid, 'глобальный бан', final_reason)
                 await kick_user(peer_id, uid)
                 await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНЫЙ БАН\n👤 {user_name}\n⏰ {ft}\n📝 {final_reason}", random_id=0)
             except: pass
@@ -882,6 +1011,7 @@ async def gunban_cmd(msg: Message, target: str):
         for peer_id in chats:
             try:
                 cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban'", (uid, peer_id))
+                add_log(cur, peer_id, msg.from_id, uid, 'глобальный разбан')
                 await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНЫЙ РАЗБАН\n👤 {user_name}", random_id=0)
             except: pass
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ РАЗБАН\n👤 {user_name}\n📊 {len(chats)} бесед")
@@ -915,6 +1045,7 @@ async def gkick_cmd(msg: Message, target: str):
         for peer_id in chats:
             try:
                 await kick_user(peer_id, uid)
+                add_log(cur, peer_id, msg.from_id, uid, 'глобальный кик')
                 await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНЫЙ КИК\n👤 {user_name}", random_id=0)
             except: pass
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ КИК\n👤 {user_name}\n📊 {len(chats)} бесед")
@@ -953,6 +1084,7 @@ async def ggiverole_cmd(msg: Message, target: str, priority: str):
         for peer_id in chats:
             try:
                 cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (uid, peer_id, p, p))
+                add_log(cur, peer_id, msg.from_id, uid, f'глобальная роль {p}')
                 role_display = get_role_name(cur, peer_id, p)
                 await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНАЯ РОЛЬ\n👤 {user_name}\n📋 {role_display}", random_id=0)
             except: pass
@@ -987,6 +1119,7 @@ async def gremoverole_cmd(msg: Message, target: str):
         for peer_id in chats:
             try:
                 cur.execute("UPDATE users SET role=0 WHERE user_id=%s AND peer_id=%s", (uid, peer_id))
+                add_log(cur, peer_id, msg.from_id, uid, 'глобальный сброс роли')
                 await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНЫЙ СБРОС РОЛИ\n👤 {user_name}", random_id=0)
             except: pass
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ СБРОС РОЛИ\n👤 {user_name}\n📊 {len(chats)} бесед")
@@ -1055,6 +1188,7 @@ async def gsnick_cmd(msg: Message, target: str, nick: str):
         for peer_id in chats:
             try:
                 cur.execute("INSERT INTO users (user_id, peer_id, nickname) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET nickname=%s", (uid, peer_id, nick, nick))
+                add_log(cur, peer_id, msg.from_id, uid, f'глобальный ник: {nick}')
                 await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНЫЙ НИК\n👤 {user_name}\n🏷 {nick}", random_id=0)
             except: pass
         await msg.answer(f"🌐 ГЛОБАЛЬНЫЙ НИК\n👤 {user_name}\n🏷 {nick}\n📊 {len(chats)} бесед")
@@ -1088,6 +1222,7 @@ async def grnick_cmd(msg: Message, target: str):
         for peer_id in chats:
             try:
                 cur.execute("UPDATE users SET nickname=NULL WHERE user_id=%s AND peer_id=%s", (uid, peer_id))
+                add_log(cur, peer_id, msg.from_id, uid, 'глобальное удаление ника')
                 await bot.api.messages.send(peer_id=peer_id, message=f"🌐 ГЛОБАЛЬНОЕ УДАЛЕНИЕ НИКА\n👤 {user_name}", random_id=0)
             except: pass
         await msg.answer(f"🌐 ГЛОБАЛЬНОЕ УДАЛЕНИЕ НИКА\n👤 {user_name}\n📊 {len(chats)} бесед")
@@ -1144,6 +1279,7 @@ async def sysrole_cmd(msg: Message, target: str, priority: str):
     conn, cur = db()
     try:
         cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (uid, msg.peer_id, p, p))
+        add_log(cur, msg.peer_id, msg.from_id, uid, f'системная роль {p}')
         role_display = get_role_name(cur, msg.peer_id, p)
         await msg.answer(f"🎖️ РОЛЬ ВЫДАНА\n👤 {await get_user_name(uid)}\n📋 {role_display}")
     finally: conn.close()
@@ -1199,6 +1335,7 @@ async def giverole_cmd(msg: Message, target: str, priority: str):
             return await msg.answer(f"❌ Роль {p} не создана\n/addrole {p} Название")
         if p >= user_role and msg.from_id != OWNER_ID: return await msg.answer(f"❌ Нельзя выдать роль {p}")
         cur.execute("INSERT INTO users (user_id, peer_id, role) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET role=%s", (uid, msg.peer_id, p, p))
+        add_log(cur, msg.peer_id, msg.from_id, uid, f'выдача роли {p}')
         role_display = get_role_name(cur, msg.peer_id, p)
         await msg.answer(f"🎖️ РОЛЬ ВЫДАНА\n👤 {await get_user_name(uid)}\n📋 {role_display}")
     finally: conn.close()
@@ -1225,6 +1362,7 @@ async def removerole_cmd(msg: Message, target: str):
         if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             return await msg.answer("❌ Нельзя снять роль у равного или высшего")
         cur.execute("UPDATE users SET role=0 WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'сброс роли')
         await msg.answer(f"🗑 РОЛЬ СБРОШЕНА\n👤 {await get_user_name(uid)}")
     finally: conn.close()
 
@@ -1314,8 +1452,10 @@ async def warn_cmd(msg: Message, target: str, reason: str = "Без причин
         cur.execute("SELECT warn_count FROM users WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
         warns = cur.fetchone()[0]
         user_name = await get_user_name(uid)
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'предупреждение', reason)
         if warns >= 3:
             cur.execute("INSERT INTO punishments (user_id, peer_id, type, reason, banned_by) VALUES (%s,%s,'ban','Авто-бан (3 пред.)',%s)", (uid, msg.peer_id, msg.from_id))
+            add_log(cur, msg.peer_id, msg.from_id, uid, 'авто-бан', '3 предупреждения')
             await kick_user(msg.peer_id, uid)
             return await msg.answer(f"🚫 АВТО-БАН\n👤 {user_name}\n3 предупреждения")
         await msg.answer(f"⚠️ ПРЕДУПРЕЖДЕНИЕ\n👤 {user_name}\n{warns}/3\n📝 {reason}")
@@ -1358,6 +1498,7 @@ async def process_mute(msg: Message, target: str, time_str: str, reason: str):
         end_time = datetime.now() + duration if duration else None
         ft = format_time(duration) if duration else "навсегда"
         cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at, reason, banned_by) VALUES (%s,%s,'mute',%s,%s,%s)", (uid, msg.peer_id, end_time, final_reason, msg.from_id))
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'мут', final_reason)
         await msg.answer(f"🔇 МУТ\n👤 {await get_user_name(uid)}\n⏰ {ft}\n📝 {final_reason}")
     finally: conn.close()
 
@@ -1383,6 +1524,7 @@ async def unmute_cmd(msg: Message, target: str):
         if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             return await msg.answer("❌ Нельзя снять мут равному или высшему")
         cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='mute'", (uid, msg.peer_id))
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'снятие мута')
         await msg.answer("🔊 Мут снят")
     finally: conn.close()
 
@@ -1424,6 +1566,7 @@ async def process_ban(msg: Message, target: str, time_str: str, reason: str):
         end_time = datetime.now() + duration if duration else None
         ft = format_time(duration) if duration else "навсегда"
         cur.execute("INSERT INTO punishments (user_id, peer_id, type, end_at, reason, banned_by) VALUES (%s,%s,'ban',%s,%s,%s)", (uid, msg.peer_id, end_time, final_reason, msg.from_id))
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'бан', final_reason)
         await kick_user(msg.peer_id, uid)
         await msg.answer(f"🚫 БАН\n👤 {await get_user_name(uid)}\n⏰ {ft}\n📝 {final_reason}")
     finally: conn.close()
@@ -1450,6 +1593,7 @@ async def unban_cmd(msg: Message, target: str):
         if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             return await msg.answer("❌ Нельзя разбанить равного или высшего")
         cur.execute("DELETE FROM punishments WHERE user_id=%s AND peer_id=%s AND type='ban'", (uid, msg.peer_id))
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'разбан')
         await msg.answer("✅ Бан снят")
     finally: conn.close()
 
@@ -1510,6 +1654,7 @@ async def kick_cmd(msg: Message, target: str):
         if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             return await msg.answer("❌ Нельзя кикнуть равного или высшего")
         await kick_user(msg.peer_id, uid)
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'кик')
         await msg.answer("👢 Исключён")
     finally: conn.close()
 
@@ -1542,6 +1687,7 @@ async def snick_cmd(msg: Message, target: str, nick: str):
         if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
             return await msg.answer("❌ Нельзя установить ник равному или высшему")
         cur.execute("INSERT INTO users (user_id, peer_id, nickname) VALUES (%s,%s,%s) ON CONFLICT (user_id, peer_id) DO UPDATE SET nickname=%s", (uid, msg.peer_id, nick, nick))
+        add_log(cur, msg.peer_id, msg.from_id, uid, f'установка ника: {nick}')
         await msg.answer(f"🏷 НИК УСТАНОВЛЕН\n👤 {await get_user_name(uid)}\n🏷 {nick}")
     finally: conn.close()
 
@@ -1572,6 +1718,7 @@ async def rnick_cmd(msg: Message, target: str = ""):
             if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID:
                 return await msg.answer("❌ Нельзя удалить ник равному или высшему")
         cur.execute("UPDATE users SET nickname=NULL WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'удаление ника')
         await msg.answer(f"🧹 НИК УДАЛЁН\n👤 {await get_user_name(uid)}\n❌ Был: {old_nick}")
     finally: conn.close()
 
