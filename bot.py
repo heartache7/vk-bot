@@ -688,21 +688,26 @@ async def replyreport_cmd(msg: Message, report_id: str, text: str):
         report = cur.fetchone()
         if not report: return await msg.answer(f"❌ Репорт #{rid} не найден или уже отвечен")
         user_id, peer_id = report
-sent = False
+        sent = False
         replier_name = await get_user_name(msg.from_id)
         try:
             await bot.api.messages.send(user_id=user_id, message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n👤 {replier_name} ответил:\n\n{text}\n\n📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}", random_id=0)
             sent = True
-        except: pass
+        except:
+            pass
         if not sent and peer_id > 2000000000:
             try:
                 await bot.api.messages.send(peer_id=peer_id, message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n👤 @id{user_id}\n👤 Ответил: {replier_name}\n\n{text}\n\n💡 Откройте ЛС для бота чтобы получать ответы там.", random_id=0)
                 sent = True
-            except: pass
+            except:
+                pass
         cur.execute("UPDATE reports SET status='closed', reply=%s, replied_by=%s WHERE id=%s", (text, msg.from_id, rid))
-        if sent: await msg.answer(f"✅ Ответ на репорт #{rid} отправлен")
-        else: await msg.answer("⚠️ Ответ сохранён, но не удалось отправить (ЛС закрыты)")
-    finally: conn.close()
+        if sent:
+            await msg.answer(f"✅ Ответ на репорт #{rid} отправлен")
+        else:
+            await msg.answer("⚠️ Ответ сохранён, но не удалось отправить (ЛС закрыты)")
+    finally:
+        conn.close()
 
 # =========================
 # REPORT
