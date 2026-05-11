@@ -107,13 +107,33 @@ def init():
             );""")
 
             cur.execute("""
+            CREATE TABLE IF NOT EXISTS marriages(
+                id SERIAL PRIMARY KEY,
+                peer_id BIGINT,
+                user1_id BIGINT,
+                user2_id BIGINT,
+                married_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(peer_id, user1_id),
+                UNIQUE(peer_id, user2_id)
+            );""")
+
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS marriage_proposals(
+                id SERIAL PRIMARY KEY,
+                peer_id BIGINT,
+                from_id BIGINT,
+                to_id BIGINT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );""")
+
+            cur.execute("""
             INSERT INTO cmd_permissions (peer_id, cmd_name, required_role)
             VALUES (0, 'log', 70)
             ON CONFLICT (peer_id, cmd_name) DO UPDATE SET required_role = 70
             """)
 
             default_permissions = [
-                ('warn', 20), ('mute', 20), ('unmute', 20),
+                ('warn', 20), ('unwarn', 20), ('mute', 20), ('unmute', 20),
                 ('ban', 50), ('unban', 50), ('kick', 20),
                 ('snick', 20), ('rnick', 20), ('giverole', 50),
                 ('stats', 0), ('addrole', 100), ('removerole', 50),
@@ -123,7 +143,8 @@ def init():
                 ('gban', 50), ('gkick', 50), ('ggiverole', 50), ('gzov', 50),
                 ('gremoverole', 50), ('gsnick', 50), ('grnick', 50),
                 ('gunban', 50), ('gnick', 20), ('getban', 50), ('groups', 100),
-                ('report', 0), ('top', 0), ('activity', 0), ('log', 70)
+                ('report', 0), ('top', 0), ('activity', 0), ('log', 70),
+                ('marry', 0), ('divorce', 0), ('marriages', 0), ('marryinfo', 0)
             ]
             
             for cmd, role in default_permissions:
@@ -154,7 +175,8 @@ def init():
                 """, (priority, name))
 
             logger.info(">>> DB OK")
-        finally: conn.close()
+        finally:
+            conn.close()
     except Exception as e:
         logger.error(f"DB INIT ERROR: {e}")
         raise
@@ -303,6 +325,16 @@ def get_group_chats(cur, group_id):
     cur.execute("SELECT peer_id FROM group_chats WHERE group_id=%s", (group_id,))
     return [r[0] for r in cur.fetchall()]
 
+def is_married(cur, peer_id, user_id):
+    """Проверяет, состоит ли пользователь в браке"""
+    cur.execute("SELECT id FROM marriages WHERE peer_id=%s AND (user1_id=%s OR user2_id=%s)", (peer_id, user_id, user_id))
+    return cur.fetchone() is not None
+
+def get_marriage(cur, peer_id, user_id):
+    """Получает информацию о браке пользователя"""
+    cur.execute("SELECT user1_id, user2_id FROM marriages WHERE peer_id=%s AND (user1_id=%s OR user2_id=%s)", (peer_id, user_id, user_id))
+    return cur.fetchone()
+
 async def kick_user(peer_id, user_id):
     try:
         await bot.api.messages.remove_chat_user(chat_id=peer_id-2000000000, user_id=user_id)
@@ -349,6 +381,7 @@ async def help_cmd(msg: Message):
         "/clearnicks - очистить ники вышедших\n\n"
         "⚠️ МОДЕРАЦИЯ:\n"
         "/warn @user [причина] - предупреждение\n"
+        "/unwarn @user - снять предупреждение\n"
         "/mute @user [время] [причина] - мут\n"
         "/unmute @user - снять мут\n"
         "/ban @user [время] [причина] - бан\n"
@@ -362,6 +395,13 @@ async def help_cmd(msg: Message):
         "/delrole [приоритет] - удалить роль\n"
         "/roles - список ролей\n"
         "/staff - список персонала\n\n"
+        "💍 БРАКИ:\n"
+        "/marry @user - предложить брак\n"
+        "/accept - принять предложение\n"
+        "/decline - отклонить предложение\n"
+        "/divorce - развестись\n"
+        "/marriages - список браков\n"
+        "/marryinfo @user - инфо о браке\n\n"
         "📢 /zov [причина] - позвать всех\n\n"
         "🌐 ОБЪЕДИНЕНИЯ:\n"
         "/creategroup [название] - создать\n"
@@ -378,6 +418,132 @@ async def help_cmd(msg: Message):
         "🐛 /report - сообщить об ошибке\n\n"
         "💡 Отвечайте на сообщение пользователя для быстрого действия"
     )
+
+# =========================
+# MARRY
+# =========================
+@bot.on.message(text="/marry")
+async def marry_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    return await msg.answer("💍 БРАК\n\n/marry @user - предложить брак\n/accept - принять\n/decline - отклонить\n/divorce - развестись")
+
+@bot.on.message(text="/marry <target>")
+async def marry_propose(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
+    uid = get_target_id(msg) or await resolve_user_id(target.replace("@", "").strip())
+    if not uid: return await msg.answer("❌ Пользователь не найден")
+    if uid == msg.from_id: return await msg.answer("❌ Нельзя жениться на себе")
+    
+    conn, cur = db()
+    try:
+        if is_married(cur, msg.peer_id, msg.from_id):
+            return await msg.answer("❌ Вы уже состоите в браке\n💡 Используйте /divorce для развода")
+        if is_married(cur, msg.peer_id, uid):
+            return await msg.answer("❌ Этот пользователь уже состоит в браке")
+        
+        # Проверяем, нет ли уже предложения
+        cur.execute("SELECT id FROM marriage_proposals WHERE peer_id=%s AND to_id=%s", (msg.peer_id, uid))
+        if cur.fetchone():
+            return await msg.answer("❌ Этому пользователю уже отправлено предложение")
+        
+        cur.execute("INSERT INTO marriage_proposals (peer_id, from_id, to_id) VALUES (%s,%s,%s)", (msg.peer_id, msg.from_id, uid))
+        from_name = await get_user_name(msg.from_id)
+        to_name = await get_user_name(uid)
+        await msg.answer(f"💍 ПРЕДЛОЖЕНИЕ ОТПРАВЛЕНО\n\n👤 {from_name} предлагает брак {to_name}\n\n💡 {to_name}, напишите /accept или /decline")
+    finally: conn.close()
+
+@bot.on.message(text="/accept")
+async def marry_accept(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        cur.execute("SELECT from_id FROM marriage_proposals WHERE peer_id=%s AND to_id=%s", (msg.peer_id, msg.from_id))
+        proposal = cur.fetchone()
+        if not proposal: return await msg.answer("❌ У вас нет активных предложений")
+        
+        from_id = proposal[0]
+        if is_married(cur, msg.peer_id, msg.from_id) or is_married(cur, msg.peer_id, from_id):
+            cur.execute("DELETE FROM marriage_proposals WHERE peer_id=%s AND to_id=%s", (msg.peer_id, msg.from_id))
+            return await msg.answer("❌ Один из вас уже в браке")
+        
+        cur.execute("INSERT INTO marriages (peer_id, user1_id, user2_id) VALUES (%s,%s,%s)", (msg.peer_id, from_id, msg.from_id))
+        cur.execute("DELETE FROM marriage_proposals WHERE peer_id=%s AND to_id=%s", (msg.peer_id, msg.from_id))
+        
+        name1 = await get_user_name(from_id)
+        name2 = await get_user_name(msg.from_id)
+        await msg.answer(f"💍 ПОЗДРАВЛЯЕМ!\n\n{name1} и {name2} теперь в браке! 💕")
+    finally: conn.close()
+
+@bot.on.message(text="/decline")
+async def marry_decline(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        cur.execute("SELECT from_id FROM marriage_proposals WHERE peer_id=%s AND to_id=%s", (msg.peer_id, msg.from_id))
+        if not cur.fetchone(): return await msg.answer("❌ У вас нет активных предложений")
+        cur.execute("DELETE FROM marriage_proposals WHERE peer_id=%s AND to_id=%s", (msg.peer_id, msg.from_id))
+        await msg.answer("💔 Предложение отклонено")
+    finally: conn.close()
+
+# =========================
+# DIVORCE
+# =========================
+@bot.on.message(text="/divorce")
+async def divorce_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    return await msg.answer("💔 РАЗВОД\n\n/divorce - развестись с текущим супругом")
+
+@bot.on.message(text="/divorce")
+async def divorce_cmd(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        marriage = get_marriage(cur, msg.peer_id, msg.from_id)
+        if not marriage: return await msg.answer("❌ Вы не состоите в браке")
+        user1, user2 = marriage
+        cur.execute("DELETE FROM marriages WHERE peer_id=%s AND (user1_id=%s OR user2_id=%s)", (msg.peer_id, msg.from_id, msg.from_id))
+        spouse_name = await get_user_name(user1 if user1 != msg.from_id else user2)
+        await msg.answer(f"💔 РАЗВОД\n\nВы развелись с {spouse_name}")
+    finally: conn.close()
+
+# =========================
+# MARRIAGES / MARRYINFO
+# =========================
+@bot.on.message(text="/marriages")
+async def marriages_list(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        cur.execute("SELECT user1_id, user2_id FROM marriages WHERE peer_id=%s", (msg.peer_id,))
+        marriages = cur.fetchall()
+        if not marriages: return await msg.answer("💍 БРАКИ\n\n❌ В этой беседе нет браков")
+        text = f"💍 БРАКИ ({len(marriages)}):\n\n"
+        for u1, u2 in marriages:
+            try: n1 = await get_user_name(u1)
+            except: n1 = f"id{u1}"
+            try: n2 = await get_user_name(u2)
+            except: n2 = f"id{u2}"
+            text += f"💕 {n1} ❤️ {n2}\n"
+        await msg.answer(text)
+    finally: conn.close()
+
+@bot.on.message(text="/marryinfo <target>")
+async def marryinfo_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
+    uid = get_target_id(msg) or await resolve_user_id(target.replace("@", "").strip())
+    if not uid: uid = msg.from_id
+    conn, cur = db()
+    try:
+        marriage = get_marriage(cur, msg.peer_id, uid)
+        if not marriage:
+            user_name = await get_user_name(uid)
+            return await msg.answer(f"💍 ИНФОРМАЦИЯ О БРАКЕ\n\n👤 {user_name}\n💔 Не в браке")
+        u1, u2 = marriage
+        spouse_id = u1 if u1 != uid else u2
+        user_name = await get_user_name(uid)
+        spouse_name = await get_user_name(spouse_id)
+        await msg.answer(f"💍 ИНФОРМАЦИЯ О БРАКЕ\n\n👤 {user_name}\n💕 В браке с {spouse_name}")
+    finally: conn.close()
 
 # =========================
 # BOTROLE
@@ -521,8 +687,7 @@ async def replyreport_cmd(msg: Message, report_id: str, text: str):
         cur.execute("SELECT user_id, peer_id FROM reports WHERE id=%s AND status='open'", (rid,))
         report = cur.fetchone()
         if not report: return await msg.answer(f"❌ Репорт #{rid} не найден или уже отвечен")
-        user_id, peer_id = report
-        sent = False
+        user_id, peer_id = report        sent = False
         replier_name = await get_user_name(msg.from_id)
         try:
             await bot.api.messages.send(user_id=user_id, message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n👤 {replier_name} ответил:\n\n{text}\n\n📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}", random_id=0)
@@ -592,19 +757,14 @@ async def admin_panel(msg: Message):
             f"🐛 Открытых репортов: {open_reports}\n"
             f"🏅 Должностей выдано: {total_bot_roles}\n\n"
             f"📋 Команды админ-панели:\n"
-            f"/globalban [id] [время] [причина] - бан во всех беседах\n"
-            f"/globalunban [id] - разбан во всех беседах\n"
-            f"/broadcast [текст] - рассылка во все беседы\n"
-            f"/sendto [peer_id] [текст] - сообщение в конкретную беседу\n"
-            f"/reports - список открытых репортов\n"
-            f"/replyreport [номер] [текст] - ответить на репорт\n"
-            f"/botrole @user [должность] - выдать должность\n"
-            f"/removebotrole @user - снять должность\n"
-            f"/botroles - список всех должностей\n"
-            f"/sysrole @user [приоритет] - выдать системную роль\n"
-            f"/adminchats - список всех бесед\n"
-            f"/adminhelp - эта помощь\n"
-            f"/admin - главная панель"
+            f"/globalban [id] [время] [причина]\n"
+            f"/globalunban [id]\n"
+            f"/broadcast [текст]\n"
+            f"/sendto [peer_id] [текст]\n"
+            f"/reports /replyreport\n"
+            f"/botrole /removebotrole /botroles\n"
+            f"/sysrole @user [приоритет]\n"
+            f"/adminchats /adminhelp /admin"
         )
     finally: conn.close()
 
@@ -618,20 +778,15 @@ async def admin_help(msg: Message):
     await msg.answer(
         "👑 АДМИН-ПАНЕЛЬ - ПОМОЩЬ\n\n"
         "/admin - главная панель\n"
-        "/adminchats - список бесед с названиями\n"
+        "/adminchats - список бесед\n"
         "/globalban [id] [время] [причина] - глобальный бан\n"
-        "  Пример: /globalban 123456789 1d спам\n\n"
         "/globalunban [id] - глобальный разбан\n"
-        "  Пример: /globalunban 123456789\n\n"
-        "/broadcast [текст] - рассылка во все беседы\n"
-        "  Пример: /broadcast Всем привет!\n\n"
+        "/broadcast [текст] - рассылка\n"
         "/sendto [peer_id] [текст] - сообщение в беседу\n"
-        "  Пример: /sendto 2000000001 Привет!\n\n"
         "/reports - открытые репорты\n"
-        "/replyreport [номер] [текст] - ответ на репорт\n"
-        "  Пример: /replyreport 1 Ваш ответ\n\n"
-        "/botrole @user [должность] - выдать должность\n"
-        "/removebotrole @user - снять должность\n"
+        "/replyreport [номер] [текст] - ответ\n"
+        "/botrole @user [должность] - выдать\n"
+        "/removebotrole @user - снять\n"
         "/botroles - список должностей\n"
         "/sysrole @user [приоритет] - системная роль"
     )
@@ -663,9 +818,6 @@ async def admin_chats(msg: Message):
         else: await msg.answer(text)
     finally: conn.close()
 
-# =========================
-# GLOBAL COMMANDS
-# =========================
 @bot.on.message(text="/globalban <target_id> <time_str> <reason>")
 async def globalban_cmd(msg: Message, target_id: str, time_str: str, reason: str):
     if msg.peer_id > 2000000000: return
@@ -1407,7 +1559,7 @@ async def staff(msg: Message):
     finally: conn.close()
 
 # =========================
-# WARN / MUTE / UNMUTE / BAN / UNBAN / GETBAN / KICK
+# WARN / UNWARN / MUTE / UNMUTE / BAN / UNBAN / GETBAN / KICK
 # =========================
 @bot.on.message(text="/warn")
 async def warn_help(msg: Message):
@@ -1438,6 +1590,34 @@ async def warn_cmd(msg: Message, target: str, reason: str = "Без указан
             await kick_user(msg.peer_id, uid)
             return await msg.answer(f"🚫 АВТОМАТИЧЕСКИЙ БАН\n\n👤 {user_name}\n📋 Причина: 3 предупреждения")
         await msg.answer(f"⚠️ ПРЕДУПРЕЖДЕНИЕ ВЫДАНО\n\n👤 {user_name}\n📊 Статус: {warns}/3\n📝 Причина: {reason}")
+    finally: conn.close()
+
+@bot.on.message(text="/unwarn")
+async def unwarn_help(msg: Message):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try: req = get_cmd_required_role(cur, msg.peer_id, 'unwarn')
+    finally: conn.close()
+    return await msg.answer(f"⚠️ /unwarn @user\nСнимает одно предупреждение\nТребуется роль {req}+")
+
+@bot.on.message(text="/unwarn <target>")
+async def unwarn_cmd(msg: Message, target: str):
+    if msg.peer_id < 2000000000: return
+    conn, cur = db()
+    try:
+        ok, user_role, req = check_permission(cur, msg.peer_id, msg.from_id, 'unwarn')
+        if not ok: return await msg.answer(f"❌ Требуется роль {req}+ (у вас {user_role})")
+        uid = get_target_id(msg) or await resolve_user_id(target.replace("@", "").strip())
+        if not uid: return await msg.answer("❌ Пользователь не найден")
+        if not can_punish(cur, msg.peer_id, msg.from_id, uid) and msg.from_id != OWNER_ID: return await msg.answer("❌ Нельзя снять предупреждение с равного или высшего")
+        cur.execute("SELECT warn_count FROM users WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
+        res = cur.fetchone()
+        if not res or res[0] <= 0: return await msg.answer("❌ У пользователя нет предупреждений")
+        cur.execute("UPDATE users SET warn_count = GREATEST(warn_count - 1, 0) WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
+        cur.execute("SELECT warn_count FROM users WHERE user_id=%s AND peer_id=%s", (uid, msg.peer_id))
+        warns = cur.fetchone()[0]
+        add_log(cur, msg.peer_id, msg.from_id, uid, 'снятие предупреждения')
+        await msg.answer(f"⚠️ ПРЕДУПРЕЖДЕНИЕ СНЯТО\n\n👤 {await get_user_name(uid)}\n📊 Статус: {warns}/3")
     finally: conn.close()
 
 @bot.on.message(text="/mute")
@@ -1611,7 +1791,8 @@ async def kick_cmd(msg: Message, target: str):
     finally: conn.close()
 
 # =========================
-# SNICK / RNICK / GNICK / NLIST / CLEARNICKS / STATS# =========================
+# SNICK / RNICK / GNICK / NLIST / CLEARNICKS / STATS
+# =========================
 @bot.on.message(text="/snick")
 async def snick_help(msg: Message):
     if msg.peer_id < 2000000000: return
@@ -1759,8 +1940,14 @@ async def stats_cmd(msg: Message, target: str = ""):
         status = "🚫 ЗАБАНЕН" if is_user_banned(msg.peer_id, uid) else "🔇 ЗАМУЧЕН" if is_user_muted(msg.peer_id, uid) else "✅ Активен"
         role_display = get_role_name(cur, msg.peer_id, role)
         bot_role = get_bot_role(cur, uid)
+        marriage = get_marriage(cur, msg.peer_id, uid)
         text = f"📊 СТАТИСТИКА ПОЛЬЗОВАТЕЛЯ\n\n👤 {name}\n🆔 ID: {uid}\n📊 Статус: {status}\n🎖️ Роль: {role_display}\n"
         if bot_role: text += f"🏅 Должность: {bot_role}\n"
+        if marriage:
+            spouse_id = marriage[0] if marriage[0] != uid else marriage[1]
+            try: spouse_name = await get_user_name(spouse_id)
+            except: spouse_name = f"id{spouse_id}"
+            text += f"💍 В браке с: {spouse_name}\n"
         text += f"💬 Сообщений: {msgs}\n⚠️ Предупреждений: {warns}/3"
         if nick: text += f"\n🏷 Ник: {nick}"
         await msg.answer(text)
