@@ -687,7 +687,8 @@ async def replyreport_cmd(msg: Message, report_id: str, text: str):
         cur.execute("SELECT user_id, peer_id FROM reports WHERE id=%s AND status='open'", (rid,))
         report = cur.fetchone()
         if not report: return await msg.answer(f"❌ Репорт #{rid} не найден или уже отвечен")
-        user_id, peer_id = report        sent = False
+        user_id, peer_id = report
+sent = False
         replier_name = await get_user_name(msg.from_id)
         try:
             await bot.api.messages.send(user_id=user_id, message=f"📢 ОТВЕТ НА РЕПОРТ #{rid}\n\n👤 {replier_name} ответил:\n\n{text}\n\n📅 {datetime.now().strftime('%d.%m.%Y в %H:%M')}", random_id=0)
